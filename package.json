@@ -1,0 +1,15 @@
+{
+  "name": "weread-mp-fetcher",
+  "version": "0.1.0",
+  "description": "通过微信读书抓取公众号最新文章,零依赖,复用你已登录的 Chrome",
+  "type": "module",
+  "bin": { "weread-mp-fetcher": "bin/weread.mjs" },
+  "scripts": {
+    "test": "node test/offline.test.mjs",
+    "probe": "node bin/weread.mjs --probe"
+  },
+  "engines": { "node": ">=18" },
+  "license": "MIT",
+  "keywords": ["wechat", "weixin", "mp", "weread", "微信公众号", "微信读书"],
+  "files": ["bin", "lib", "docs", "config.example.json", "README.md", "LICENSE"]
+}

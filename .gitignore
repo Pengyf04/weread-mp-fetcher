@@ -1,0 +1,15 @@
+# 你的私人配置:含阅读器页 URL 和你监控的公众号列表,绝不入库
+config.json
+config.*.json
+!config.example.json
+
+# 抓取次数记录
+*.quota.json
+quota.json
+
+# 抓下来的数据
+out/
+*.out.json
+
+node_modules/
+.DS_Store
