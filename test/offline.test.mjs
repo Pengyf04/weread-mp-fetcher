@@ -9,7 +9,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
-import { PROBE_JS, buildFetchJs } from '../lib/scripts.mjs';
+import { PROBE_JS, buildFetchJs, LIST_SHELF_JS } from '../lib/scripts.mjs';
+import { extractBiz, bizToBookId, resolveBookId } from '../lib/mp.mjs';
 import * as quota from '../lib/quota.mjs';
 
 let passed = 0;
@@ -131,6 +132,33 @@ const out = JSON.parse(
 assert.equal(out.sources[0].items.length, 2, '同一次群发的两篇都要取到');
 assert.equal(out.sources[0].items[0].url, 'https://mp.weixin.qq.com/s/AAA');
 ok('一次群发含多篇时全部展开,原文链接拼接正确');
+
+// ---------- bookId 推导 ----------
+console.log('bookId 推导');
+
+assert.equal(bizToBookId('MTIzNDU2Nzg5MA=='), 'MP_WXS_1234567890');
+ok('__biz base64 解码后拼成 bookId');
+
+assert.equal(bizToBookId('bm90LWEtbnVtYmVy'), null, '解出来不是纯数字应判无效');
+ok('无效 __biz 被拒');
+
+assert.equal(extractBiz('https://mp.weixin.qq.com/s?__biz=MTIzNDU2Nzg5MA%3D%3D&mid=1'), 'MTIzNDU2Nzg5MA==');
+ok('URL 里的 __biz 能取出(含 URL 编码)');
+
+assert.equal(extractBiz('var biz = "MTIzNDU2Nzg5MA==";'), 'MTIzNDU2Nzg5MA==');
+ok('文章 HTML 里的 var biz 能取出');
+
+assert.equal((await resolveBookId('MP_WXS_1234567890')).bookId, 'MP_WXS_1234567890');
+ok('直接给 bookId 时原样返回(不联网)');
+
+await assert.rejects(() => resolveBookId('这不是链接也不是bookId'), /认不出来/);
+ok('垃圾输入被拒');
+
+// ---------- 书架脚本 ----------
+console.log('书架脚本');
+assert.ok(LIST_SHELF_JS.includes('deepLink'), '必须从 deepLink 推导 readerUrl');
+assert.ok(LIST_SHELF_JS.includes('/web/mp/reader/'), 'readerUrl 前缀不能少');
+ok('书架脚本会推导出 readerUrl(用户不必手动复制)');
 
 // ---------- 额度闸门 ----------
 console.log('额度闸门');

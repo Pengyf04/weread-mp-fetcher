@@ -37,7 +37,15 @@ node bin/weread.mjs --format md
 - 桌面版 Chrome
 - 一个微信号（用来扫码登录微信读书）
 
-### 第 1 步：让 Chrome 开着调试端口
+### 第 1 步：装上
+
+```bash
+git clone https://github.com/Pengyf04/weread-mp-fetcher.git
+cd weread-mp-fetcher
+cp config.example.json config.json
+```
+
+### 第 2 步：让 Chrome 开着调试端口
 
 工具需要在**你已登录的那个 Chrome** 里执行 JS，所以要用调试端口启动它。
 
@@ -61,41 +69,53 @@ node bin/weread.mjs --format md
 google-chrome --remote-debugging-port=9222
 ```
 
-用你**平时那个 Chrome 配置**打开就行，登录状态都在，不要加 `--user-data-dir` 指向新目录，那样等于开了一个没登录过的浏览器。
+用你**平时那个 Chrome 配置**打开就行，登录状态都在。不要加 `--user-data-dir` 指向新目录，那等于开了一个没登录过的浏览器。
 
-> 调试端口只监听 `127.0.0.1`，外部访问不到。但开着它意味着本机任何程序都能控制这个 Chrome，介意的话用完就正常重启一次 Chrome。
+> 调试端口只监听 `127.0.0.1`，外部访问不到。但开着它意味着本机程序都能控制这个 Chrome，介意的话用完正常重启一次 Chrome 即可。
 
-### 第 2 步：登录微信读书，打开一个公众号
+### 第 3 步：登录微信读书
 
-1. 在这个 Chrome 里打开 <https://weread.qq.com/>，**微信扫码登录**
-2. 进「我的书架」，点开**任意一个**你关注的公众号
-3. 地址栏会变成 `https://weread.qq.com/web/mp/reader/xxxxxxxxxxxxx` —— **把这一整段 URL 复制下来**
-4. **这个标签页别关**，工具会一直复用它
+在这个 Chrome 里打开 <https://weread.qq.com/>，**微信扫码登录**。
 
-> 任意一个公众号的阅读器页，都能查询你**所有**公众号，不用一个号开一个页面。
+**就这一步需要你动手，剩下的工具全自动。**
 
-### 第 3 步：配置并运行
+### 第 4 步：把想看的公众号加进来
 
-```bash
-cp config.example.json config.json
-```
-
-把第 2 步复制的 URL 填进 `readerUrl`，然后跑一下，看看你有哪些公众号可选：
+**如果你在微信读书里已经订阅过公众号**，直接看看有哪些：
 
 ```bash
 node bin/weread.mjs --shelf
 ```
 
-会输出类似：
+**如果一个都没有**（新账号常见），随便打开该公众号的**任意一篇文章**，复制链接，然后：
+
+```bash
+node bin/weread.mjs --add https://mp.weixin.qq.com/s/xxxxxxxx
+```
+
+工具会自己算出这个号的 `bookId` 并订阅：
+
+```
+解析成功:MP_WXS_0000000000 (某某公众号)  ← 文章页里的 __biz
+已加入书架:MP_WXS_0000000000
+```
+
+> **为什么要给文章链接而不是名字？** 微信读书的网页端**搜不到公众号**（实测 6 种接口/参数组合全部无效）。但公众号的身份标识 `__biz` 就明写在它每一篇文章的页面里，`bookId = MP_WXS_ + base64解码(__biz)`——所以给一篇文章比给名字更可靠。文章链接在微信里长按「复制链接」就有。
+>
+> `--add` 也接受多个，以及直接给 `bookId`：
+> `node bin/weread.mjs --add <链接1> <链接2> MP_WXS_0000000000`
+
+### 第 5 步：配置并运行
+
+把 `--shelf` 输出里想监控的号，粘进 `config.json` 的 `accounts`：
 
 ```json
-[
-  { "name": "某某公众号",   "bookId": "MP_WXS_0000000000" },
-  { "name": "另一个公众号", "bookId": "MP_WXS_1111111111" }
+"accounts": [
+  { "name": "某某公众号", "bookId": "MP_WXS_0000000000" }
 ]
 ```
 
-把想监控的几条粘进 `config.json` 的 `accounts`，然后：
+然后：
 
 ```bash
 node bin/weread.mjs --format md
@@ -103,7 +123,7 @@ node bin/weread.mjs --format md
 
 完成。
 
----
+> **不用手动复制阅读器页 URL。** 工具会从书架接口自动推导出来。（早期版本要求手动复制，现在不需要了。）
 
 ## 命令
 
@@ -112,7 +132,8 @@ node bin/weread.mjs --format md
 | `node bin/weread.mjs` | 抓取，输出 JSON |
 | `node bin/weread.mjs --format md` | 抓取，输出 Markdown 表格 |
 | `node bin/weread.mjs --probe` | **只看页面状态，不抓取**。免费，不消耗每日次数 |
-| `node bin/weread.mjs --shelf` | 列出你收藏的公众号和它们的 `bookId` |
+| `node bin/weread.mjs --shelf` | 列出你已订阅的公众号、`bookId` 和阅读器页 URL |
+| `node bin/weread.mjs --add <链接\|bookId>...` | 订阅公众号。给文章链接会自动算出 `bookId` |
 | `node bin/weread.mjs --quota` | 看今天已经抓了几次 |
 | `--config other.json` | 用别的配置文件 |
 
@@ -161,7 +182,7 @@ $ node bin/weread.mjs
 ## 常见问题
 
 **接口返回 `-2041`**
-不是限流也不是封号，是**上下文校验**：请求必须发在阅读器页（`/web/mp/reader/...`）里，在微信读书首页发同样的请求一定失败。工具已经处理了，如果还遇到，检查 `config.json` 里的 `readerUrl` 是不是阅读器页的地址。
+不是限流也不是封号，是**上下文校验**：请求必须发在阅读器页（`/web/mp/reader/...`）里，在微信读书首页发同样的请求一定失败。工具已经处理了（自动导航到阅读器页再发请求），正常不会遇到。
 
 **接口返回 `-2010 用户不存在`**
 登录失效了，在 Chrome 里重新扫码登录微信读书即可。
@@ -174,6 +195,9 @@ $ node bin/weread.mjs
 
 **一天明明发了好几篇，只取到一篇**
 如果你是照着思路自己实现的，检查有没有只读了 `subReviews[0]`。微信读书的结构是「一次群发 = 一个条目，里面的 `subReviews` 才是一篇篇文章」，有的号一天群发 3–4 篇。本工具已经展开了。
+
+**能不能直接给公众号名字，让它自动搜出来？**
+不能。微信读书网页端搜不到公众号（实测 `/web/search/global` 加 `type`/`scope` 等参数返回的都是书；MP 专用端点全 404）。用 `--add <文章链接>` 代替，效果一样且更可靠。
 
 **找不到 Chrome 调试端口**
 确认启动 Chrome 时带了 `--remote-debugging-port=9222`，并且启动前已经**完全退出**了原来的 Chrome。也可以在 `config.json` 里显式写 `"chromePort": 9222`。
@@ -213,8 +237,10 @@ $ node bin/weread.mjs
 ```
 bin/weread.mjs        命令行入口
 lib/cdp.mjs           零依赖的 Chrome 控制客户端(自己实现了 WebSocket)
-lib/scripts.mjs       注入页面执行的两段 JS:状态探针 + 抓取
+lib/scripts.mjs       注入页面执行的 JS:状态探针 / 抓取 / 书架 / 订阅
+lib/mp.mjs            从公众号文章链接推导 bookId(解析 __biz)
 lib/quota.mjs         每日次数闸门
+test/offline.test.mjs 离线自测,不连 Chrome 也能跑
 config.example.json   配置模板
 docs/HOW-IT-WORKS.md  原理、踩过的坑、判据是怎么定出来的
 ```

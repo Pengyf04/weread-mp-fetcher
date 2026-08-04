@@ -1,12 +1,14 @@
 {
   "_说明": "复制成 config.json 再改。config.json 已被 .gitignore 忽略,不会误提交。",
 
-  "readerUrl": "https://weread.qq.com/web/mp/reader/<从浏览器地址栏复制一整段>",
-
+  "_accounts": "要监控的公众号。跑 `node bin/weread.mjs --shelf` 可以列出你已订阅的号和它们的 bookId。",
   "accounts": [
     { "name": "示例公众号一", "bookId": "MP_WXS_0000000000" },
     { "name": "示例公众号二", "bookId": "MP_WXS_1111111111" }
   ],
+
+  "_readerUrl": "可留空。工具会自动从书架接口推导出阅读器页 URL,不需要你手动复制。只有在自动推导失败时才需要手工填。",
+  "readerUrl": "",
 
   "_maxRunsPerDay": "每天最多抓几次。防风控用,别调太大。设 0 表示不限制(不推荐)。",
   "maxRunsPerDay": 2,

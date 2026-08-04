@@ -5,7 +5,8 @@
 //   node bin/weread.mjs                 抓取(默认输出 JSON)
 //   node bin/weread.mjs --format md     输出 Markdown 表格
 //   node bin/weread.mjs --probe         只看页面状态,不抓取(免费,不消耗额度)
-//   node bin/weread.mjs --shelf         列出你在微信读书收藏的公众号及其 bookId
+//   node bin/weread.mjs --shelf         列出你已订阅的公众号及其 bookId
+//   node bin/weread.mjs --add <链接|bookId>...  订阅公众号(可给文章链接,自动算出 bookId)
 //   node bin/weread.mjs --quota         查看今日已抓次数
 //   node bin/weread.mjs --config x.json 指定配置文件
 
@@ -14,7 +15,8 @@ import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { connectChrome, listTabs, createTab, evaluate } from '../lib/cdp.mjs';
-import { PROBE_JS, buildFetchJs, LIST_SHELF_JS } from '../lib/scripts.mjs';
+import { PROBE_JS, buildFetchJs, LIST_SHELF_JS, buildAddToShelfJs } from '../lib/scripts.mjs';
+import { resolveBookId } from '../lib/mp.mjs';
 import * as quota from '../lib/quota.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -45,27 +47,53 @@ function loadConfig() {
   return cfg;
 }
 
-/** 找一个可用的阅读器标签页:优先复用,没有才开新的 */
+/** 找任意一个微信读书标签页(首页也行)。书架/订阅这类接口在首页就能调。 */
+async function getAnyWereadTab(session) {
+  const tabs = await listTabs(session);
+  const wr = tabs.filter((t) => t.url.includes('weread.qq.com'));
+  // 已渲染好的阅读器页最好用,其次任意 weread 页
+  wr.sort((a, b) => Number(b.title.includes('公众号')) - Number(a.title.includes('公众号')));
+  if (wr.length) return wr[0].targetId;
+  console.error('提示:没有已打开的微信读书页面,正在打开首页。');
+  return await createTab(session, 'https://weread.qq.com/');
+}
+
+/** 读书架:拿到已订阅公众号 + 每个号的 readerUrl(从 deepLink 推导,不用手动复制) */
+async function readShelf(session, targetId) {
+  return JSON.parse(await evaluate(session, targetId, LIST_SHELF_JS));
+}
+
+/**
+ * 找一个可用的阅读器标签页。
+ * 抓文章必须在阅读器页上下文里发请求(首页发会 -2041),所以这一步不能省。
+ */
 async function getReaderTab(session, cfg) {
   const tabs = await listTabs(session);
   const readers = tabs.filter((t) => t.url.includes('weread.qq.com/web/mp/reader/'));
-  // 标题里带「公众号」的说明已经渲染好了,优先用它
   readers.sort((a, b) => Number(b.title.includes('公众号')) - Number(a.title.includes('公众号')));
-  if (readers.length) return { targetId: readers[0].targetId, opened: false };
+  if (readers.length) return readers[0].targetId;
 
-  if (!cfg.readerUrl || cfg.readerUrl.includes('<')) {
-    console.error(
-      '没有找到已打开的阅读器标签页,配置里的 readerUrl 也还没填。\n' +
-        '请在 Chrome 里打开任意一个公众号的阅读器页,把地址栏 URL 填进 config.json。\n' +
-        '详见 README「拿到阅读器页 URL」。'
-    );
-    process.exit(2);
+  // 没有现成的就自己推导一个:配置里填了就用配置的,没填就从书架里取
+  let url = cfg.readerUrl && !cfg.readerUrl.includes('<') ? cfg.readerUrl : null;
+  if (!url) {
+    const anyTab = await getAnyWereadTab(session);
+    const shelf = await readShelf(session, anyTab);
+    const withUrl = shelf.find((b) => b.readerUrl);
+    if (!withUrl) {
+      console.error(
+        '你的微信读书书架里还没有任何公众号,所以拿不到阅读器页。\n\n' +
+          '先加一个:\n' +
+          '  node bin/weread.mjs --add <该公众号任意一篇文章的链接>\n' +
+          '例如:\n' +
+          '  node bin/weread.mjs --add https://mp.weixin.qq.com/s/xxxxxxxx\n'
+      );
+      process.exit(2);
+    }
+    url = withUrl.readerUrl;
+    console.error(`提示:自动使用「${withUrl.name}」的阅读器页(无需手动复制 URL)。`);
   }
-  // ⚠️ 短时间内反复新开同一个页面是触发验证码/风控的主要原因。
-  //    正常用法应该是让那个标签页一直开着,复用它。
-  console.error('提示:没有可复用的阅读器标签页,正在新开一个。建议之后别关它,下次直接复用。');
-  const targetId = await createTab(session, cfg.readerUrl);
-  return { targetId, opened: true };
+  console.error('提示:没有可复用的阅读器标签页,正在打开一个。建议之后别关它,下次直接复用。');
+  return await createTab(session, url);
 }
 
 async function probeUntilReady(session, targetId, { tries = 12, gapMs = 5000 } = {}) {
@@ -141,19 +169,46 @@ async function main() {
 
   const session = await connectChrome({ port: cfg.chromePort, profileDir: cfg.chromeProfileDir });
   try {
-    const { targetId } = await getReaderTab(session, cfg);
+    // --shelf / --add 只用书架接口,在微信读书首页就能调,不需要阅读器页
+    if (has('--shelf') || has('--add')) {
+      const tab = await getAnyWereadTab(session);
 
-    if (has('--shelf')) {
-      const state = await probeUntilReady(session, targetId);
-      if (state.verdict !== 'ready') {
-        console.error(`页面还不能用(${state.verdict}):${explain(state)}`);
-        process.exitCode = 1;
-        return;
+      if (has('--add')) {
+        const inputs = argv.slice(argv.indexOf('--add') + 1).filter((a) => !a.startsWith('--'));
+        if (!inputs.length) {
+          console.error('用法:--add <公众号任意一篇文章的链接 或 MP_WXS_xxx> [更多...]');
+          process.exitCode = 2;
+          return;
+        }
+        const resolved = [];
+        for (const input of inputs) {
+          try {
+            const r = await resolveBookId(input);
+            console.error(`  解析成功:${r.bookId}${r.name ? ' (' + r.name + ')' : ''}  ← ${r.from}`);
+            resolved.push(r.bookId);
+          } catch (e) {
+            console.error(`  解析失败:${e.message}`);
+          }
+        }
+        if (!resolved.length) {
+          process.exitCode = 1;
+          return;
+        }
+        const res = await evaluate(session, tab, buildAddToShelfJs(resolved));
+        const okAdd = /"succ"\s*:\s*1/.test(res) || /"errCode"\s*:\s*0/.test(res);
+        console.error(okAdd ? `已加入书架:${resolved.join('、')}` : `订阅接口返回:${res.slice(0, 200)}`);
       }
-      const books = JSON.parse(await evaluate(session, targetId, LIST_SHELF_JS));
+
+      const books = await readShelf(session, tab);
       console.log(JSON.stringify(books, null, 2));
+      console.error(
+        `\n共 ${books.length} 个公众号。把想监控的 name/bookId 粘进 config.json 的 accounts 即可。`
+      );
       return;
     }
+
+    const targetId = await getReaderTab(session, cfg);
+
 
     // 先探针,再决定要不要发业务请求。探针不消耗额度,所以放在闸门前面。
     const state = await probeUntilReady(session, targetId);
