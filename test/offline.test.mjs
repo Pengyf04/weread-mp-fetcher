@@ -656,6 +656,24 @@ const allFailed = (r) => r.sources.filter((s) => s.err).length === r.sources.len
   ok('部分失败的号:表格照出,警告附在表格之后');
 }
 
+// 零篇 + partialErr:第 0 页成功但返回 0 篇、第 1 页失败。
+// 这是"没有取到文章"分支早退时会被静默吞掉的那条警告 —— 它必须还在。
+{
+  const zero = { name: '丙号', bookId: 'B3', items: [], pageMeta: [], pagesFetched: 1, partialErr: 'errCode=-2041' };
+  const md = toMarkdown([zero]);
+  assert.ok(md.includes('没有取到文章'), '零篇的说明还要在');
+  assert.ok(md.includes('第 2 页起未取到:errCode=-2041'), '零篇时 partialErr 警告不许被吞掉');
+  assert.ok(md.indexOf('未取到') > md.indexOf('没有取到文章'), '警告仍在数据说明之后');
+  assert.equal((md.match(/^\| 20\d{2}-/gm) || []).length, 0, '零篇不该凭空长出数据行');
+  assert.ok(!md.includes('| 时间 | 标题 | 链接 |'), '零篇不该出表头');
+
+  // 对照组:同样零篇但没有 partialErr → 一个字的警告都不该出现(防"无脑打印")
+  const clean = toMarkdown([{ name: '丁号', bookId: 'B4', items: [], pageMeta: [], pagesFetched: 1 }]);
+  assert.ok(clean.includes('没有取到文章'));
+  assert.ok(!clean.includes('未取到:'), '没有 partialErr 就不该有警告');
+  ok('零篇 + partialErr:警告照出(不再被"没有取到文章"分支吞掉),无 partialErr 时不误报');
+}
+
 // ---------- -2041 出错路径 ----------
 // 全离线:reloadTab / probeUntilReady / readShelf 全是假的,零网络零额度。
 console.log('-2041 出错路径');
