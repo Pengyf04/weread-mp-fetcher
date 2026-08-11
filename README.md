@@ -205,12 +205,26 @@ node bin/weread.mjs --add https://mp.weixin.qq.com/s/xxxxxxxx
 然后：
 
 ```bash
-node bin/weread.mjs --format md
+node bin/weread.mjs --format md            # 打到屏幕上
+node bin/weread.mjs --format md --out      # 直接写成文件
 ```
 
 完成。
 
 > **不用手动复制阅读器页 URL。** 工具会从书架接口自动推导出来。（早期版本要求手动复制，现在不需要了。）
+
+### 关于 `--out`
+
+```bash
+node bin/weread.mjs --format md --out              # → out/weread-20260811-1530.md
+node bin/weread.mjs --format md --out notes/a.md   # → 相对你当前所在目录
+node bin/weread.mjs --out ~/Desktop                # 给的是已存在的目录 → 在里面用默认文件名
+```
+
+- 文件一律 **UTF-8、无 BOM**，不加文件头、不加统计行——内容就是不带 `--out` 时你在屏幕上看到的那一份，一个字节都不差。用 `--out` 可以避开各家 shell 重定向（`>`）的编码差异。
+- 加了 `--out` 时 **stdout 一个字节都不输出**，写入路径、字节数、行数、篇数这些提示走 stderr。所以 `--out` 不能和 `| pbcopy` 这类管道一起用——想要管道就别加 `--out`。
+- 文件名带到分钟。**同名文件直接覆盖**，并在 stderr 多打一行提示，不会自动加 `-2`、`-3` 之类的序号。
+- ⚠️ 两条相对路径的基准**不一样**，这是刻意的：`config.json` 里的 `outDir`（常设默认）相对**仓库根**，跟 `.gitignore` 里的 `out/` 对齐；命令行上现敲的 `--out <相对路径>` 相对**你当前所在目录**，符合命令行直觉。
 
 ## 命令
 
@@ -218,6 +232,7 @@ node bin/weread.mjs --format md
 |---|---|
 | `node bin/weread.mjs` | 抓取，输出 JSON |
 | `node bin/weread.mjs --format md` | 抓取，输出 Markdown 表格 |
+| `--out [路径]` | **把结果写进文件**而不是打到屏幕上。路径可省略，省略就写 `out/weread-<年月日-时分>.<md\|json>` |
 | `node bin/weread.mjs --probe` | **只看页面状态，不抓取**。免费，不消耗每日次数 |
 | `node bin/weread.mjs --shelf` | 列出你已订阅的公众号、`bookId` 和阅读器页 URL |
 | `node bin/weread.mjs --add <链接\|bookId>...` | 订阅公众号。给文章链接会自动算出 `bookId` |

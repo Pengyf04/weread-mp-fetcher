@@ -22,6 +22,9 @@
   "_chromeProfileDir": "只影响去哪个目录找 DevToolsActivePort。方案A: 填 ~/.weread-mp-fetcher/chrome-profile(就是启动 Chrome 时 --user-data-dir 指的那个)。方案B: 留 null,扫平台默认 profile 目录。支持 ~ 开头。",
   "chromeProfileDir": "~/.weread-mp-fetcher/chrome-profile",
 
+  "_outDir": "--out 不给路径时,默认写到哪个目录。相对路径按**仓库根**解析(默认 out/ 已被 .gitignore 忽略)。注意:命令行上 --out <相对路径> 是相对你当前所在目录,两者基准不同。",
+  "outDir": "out",
+
   "_statePath": "每日次数记录存放位置,不进仓库。",
   "statePath": "~/.weread-mp-fetcher/quota.json"
 }

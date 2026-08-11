@@ -17,6 +17,7 @@ import { extractBiz, bizToBookId, resolveBookId } from '../lib/mp.mjs';
 import * as quota from '../lib/quota.mjs';
 import { has, val, valOpt } from '../lib/args.mjs';
 import { fmtTime, fmtStamp, toMarkdown } from '../lib/render.mjs';
+import { normalizeOut, writeText } from '../lib/save.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -313,6 +314,63 @@ assert.equal(fs.existsSync(guardState), false);
 ok('经符号链接调用 → 与直接调用完全相同(旧的 pathToFileURL 写法在这里会静默什么都不做)');
 
 fs.rmSync(guardDir, { recursive: true, force: true });
+
+// ---------- 导出到文件(--out) ----------
+console.log('导出到文件');
+
+// 注意顺序:失败的号放前面。err / 没取到文章这两个分支自带尾换行,
+// 放最后会让 toMarkdown 的返回值恰好以 '\n' 结尾,"补不补尾换行"这条就测不出来了。
+const FAKE_SOURCES = [
+  { name: '乙号', bookId: 'MP_WXS_0000000002', err: 'errCode=-2041' },
+  {
+    name: '甲号',
+    bookId: 'MP_WXS_0000000001',
+    items: [
+      { t: 1785636055, title: '标题里有 | 竖线', url: 'https://mp.weixin.qq.com/s/AAA1', rid: 'r1' },
+      { t: 1785549655, title: '另一篇', url: 'https://mp.weixin.qq.com/s/AAA2', rid: 'r2' },
+    ],
+  },
+];
+const outTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'wmf-out-'));
+const mdText = toMarkdown(FAKE_SOURCES);
+
+// 顺带验证会自动建目录
+const f1 = path.join(outTmp, 'sub', 'a.md');
+const st1 = writeText(f1, mdText);
+const back1 = fs.readFileSync(f1, 'utf8');
+assert.equal(back1, normalizeOut(mdText), '文件内容必须是 normalizeOut(text),不是 text');
+assert.notEqual(back1, mdText, 'toMarkdown 不带尾换行,所以这里必须补了一个');
+ok('写出的文件 === normalizeOut(渲染结果)(目录会自动创建)');
+
+assert.equal(st1.lines, (back1.match(/\n/g) || []).length, "自报行数必须 ≡ '\\n' 个数(= wc -l)");
+assert.equal(st1.bytes, fs.statSync(f1).size, '自报字节数必须 === 文件实际大小');
+ok('自报的 字节/行数 与文件实际一致(V2.2 的 J1/J2 就靠它)');
+
+assert.notEqual(fs.readFileSync(f1).slice(0, 3).toString('hex'), 'efbbbf');
+ok('无 BOM');
+
+// 幂等:text 本身已以 \n 结尾时不能补成两个
+const f2 = path.join(outTmp, 'b.md');
+writeText(f2, mdText + '\n');
+assert.equal(fs.readFileSync(f2, 'utf8'), mdText + '\n', '已有尾换行时不该再补');
+ok('尾换行归一化是幂等的');
+
+// 两条输出路径的字节等价:文件大小 === 走 stdout 时写出去的字节数
+for (const t of [mdText, mdText + '\n', '']) {
+  const f = path.join(outTmp, `eq-${Buffer.byteLength(t)}.md`);
+  const st = writeText(f, t);
+  assert.equal(st.bytes, Buffer.byteLength(normalizeOut(t), 'utf8'), '两条路径字节数必须相等');
+  assert.equal(st.bytes, fs.statSync(f).size);
+}
+ok('文件字节流 === 不加 --out 时终端收到的字节流(含空串边界)');
+
+// J5 的离线预检:md 数据行数 === items 总数(不加文件头/统计行,所以可以直接比)
+const itemsTotal = FAKE_SOURCES.reduce((n, s) => n + (s.items ? s.items.length : 0), 0);
+assert.equal((back1.match(/^\| 20\d{2}-/gm) || []).length, itemsTotal);
+assert.ok((back1.match(/\n/g) || []).length > itemsTotal, '数据行数必须少于总行数,否则判据退化成"匹配所有行"');
+ok('md 数据行数 === 本次篇数(md 不加文件头、不加统计行)');
+
+fs.rmSync(outTmp, { recursive: true, force: true });
 
 // ---------- 翻页回归基线 ----------
 console.log('翻页回归基线(golden fixture)');
