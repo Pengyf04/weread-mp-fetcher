@@ -12,7 +12,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
-import { PROBE_JS, buildPageJs, LIST_SHELF_JS } from '../lib/scripts.mjs';
+import { PROBE_JS, buildPageJs, LIST_SHELF_JS, buildAddToShelfJs } from '../lib/scripts.mjs';
 import { extractBiz, bizToBookId, resolveBookId } from '../lib/mp.mjs';
 import * as quota from '../lib/quota.mjs';
 import { has, val, valOpt } from '../lib/args.mjs';
@@ -21,7 +21,7 @@ import { normalizeOut, writeText } from '../lib/save.mjs';
 import { fetchAll, diagnose2041, format2041Note } from '../lib/fetchflow.mjs';
 import { connectChrome, CONNECT_HELP } from '../lib/cdp.mjs';
 // 直接 import bin 是安全的:入口守卫保证被 import 时不跑 main()(下面「CLI 入口守卫」一节验的就是它)
-import { getReaderTab, commitRun, readShelf } from '../bin/weread.mjs';
+import { getReaderTab, commitRun, readShelf, resolveOutPath } from '../bin/weread.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -254,6 +254,48 @@ const sh3 = await runShelfJs(null, { reject: true });
 assert.equal(sh3.out.ok, false);
 assert.ok(String(sh3.out.err).includes('boom'));
 ok('书架脚本与 buildPageJs 同口径:errCode / 页内异常都 resolve 成 {ok:false,…}');
+
+// 订阅脚本(--add):曾是全仓唯一没有 .catch 的注入脚本 —— fetch reject 会让 evaluate
+// 直接抛错穿透到顶层,已解析好的 bookId 全被丢弃。同样在 vm 里真跑验行为。
+async function runAddJs(bookIds, { reject = false, body = '{"succ":1}' } = {}) {
+  let captured = null;
+  const s = await vm.runInNewContext(buildAddToShelfJs(bookIds), {
+    fetch: (u, init) => {
+      captured = { url: u, init };
+      return reject ? Promise.reject(new Error('boom')) : Promise.resolve({ text: () => Promise.resolve(body) });
+    },
+    Promise,
+    JSON,
+    String,
+  });
+  return { captured, out: JSON.parse(s) };
+}
+
+const ad1 = await runAddJs(['MP_WXS_1', 'MP_WXS_2']);
+assert.equal(ad1.captured.url, '/mp/shelf/addToShelf');
+assert.deepEqual(JSON.parse(ad1.captured.init.body), { bookIds: ['MP_WXS_1', 'MP_WXS_2'] }, 'bookIds 要原样进请求体');
+assert.deepEqual(ad1.out, { ok: true, body: '{"succ":1}' }, '成功时原始响应文本原样带回');
+const ad2 = await runAddJs(['MP_WXS_1'], { reject: true });
+assert.equal(ad2.out.ok, false);
+assert.ok(String(ad2.out.err).includes('boom'), '页内 fetch 挂掉要 resolve 成 {ok:false},不许让 evaluate 抛错');
+ok('订阅脚本三条路径同口径:成功带回响应文本,fetch 挂掉不再穿透抛错');
+
+// ---------- --out 路径解析的目录意图 ----------
+// 靶子:`--out newdir/`(目录尚不存在)必须进目录用默认文件名,
+// 不能写出一个名叫 newdir 的文件(writeText 会递归建目录,所以目录不存在没关系)。
+console.log('--out 路径解析');
+{
+  const runResolve = (outValue) => resolveOutPath({}, 'md', ['--out', outValue]);
+  const p1 = runResolve('newdir-not-exist/');
+  assert.ok(/newdir-not-exist[\\/]weread-.*\.md$/.test(p1), `尾部斜杠 = 目录意图,即使目录不存在: ${p1}`);
+  const p2 = runResolve('某个文件.md');
+  assert.ok(/某个文件\.md$/.test(p2), '普通文件路径原样解析');
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wmf-out-'));
+  const p3 = runResolve(tmpDir);
+  assert.ok(p3.startsWith(tmpDir) && /weread-.*\.md$/.test(p3), '已存在的目录(不带斜杠)也进目录用默认名');
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+  ok('--out 目录意图:尾部斜杠/已存在目录 → 默认文件名;普通路径原样');
+}
 
 // ---------- 额度闸门 ----------
 console.log('额度闸门');

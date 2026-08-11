@@ -36,7 +36,7 @@ function loadConfig() {
       `找不到配置文件:${file}\n\n` +
         '第一次用请先复制一份模板:\n' +
         '  cp config.example.json config.json\n' +
-        '然后按 README 填上 readerUrl 和要监控的公众号。'
+        '然后把要监控的公众号填进 accounts 即可(readerUrl 可留空,工具会自动推导)。'
     );
     process.exit(2);
   }
@@ -203,14 +203,16 @@ const OUT_DEFAULT = Symbol('out-default');
  *   config 里的 outDir(常设默认)相对**仓库根**,与 .gitignore 的 out/ 对齐;
  *   --out <相对路径>(你当场敲的)相对 **cwd**,符合命令行直觉。
  */
-function resolveOutPath(cfg, fmt) {
-  const v = valOpt(argv, '--out', OUT_DEFAULT);
+export function resolveOutPath(cfg, fmt, args = argv) {
+  const v = valOpt(args, '--out', OUT_DEFAULT);
   if (v === undefined) return undefined;
   const name = `weread-${fmtStamp(new Date())}.${fmt}`;
   if (v === OUT_DEFAULT) return path.join(path.resolve(ROOT, cfg.outDir || 'out'), name);
   const p = path.resolve(process.cwd(), v);
-  // 指到一个已存在的目录 → 在里面用默认文件名
-  if (fs.existsSync(p) && fs.statSync(p).isDirectory()) return path.join(p, name);
+  // 指到目录 → 在里面用默认文件名。两种判定:已存在的目录,或用尾部斜杠表明的目录意图
+  // (后者目录可以还不存在,writeText 会递归创建 —— 否则 `--out newdir/` 会写出一个
+  //  名叫 newdir 的文件而不是进目录,这个边界坑过一次 review)。
+  if (/[\\/]$/.test(v) || (fs.existsSync(p) && fs.statSync(p).isDirectory())) return path.join(p, name);
   return p;
 }
 
@@ -296,9 +298,14 @@ async function main() {
           process.exitCode = 1;
           return;
         }
-        const res = await evaluate(session, tab, buildAddToShelfJs(resolved));
-        const okAdd = /"succ"\s*:\s*1/.test(res) || /"errCode"\s*:\s*0/.test(res);
-        console.error(okAdd ? `已加入书架:${resolved.join('、')}` : `订阅接口返回:${res.slice(0, 200)}`);
+        const add = JSON.parse(await evaluate(session, tab, buildAddToShelfJs(resolved)));
+        if (!add.ok) {
+          // 页内 fetch 挂了(网络抖动等)。bookId 都解析好了,别让用户重新折腾链接。
+          console.error(`订阅接口请求失败:${add.err}\n   解析出的 bookId 没丢,重跑同一条 --add 即可。`);
+        } else {
+          const okAdd = /"succ"\s*:\s*1/.test(add.body) || /"errCode"\s*:\s*0/.test(add.body);
+          console.error(okAdd ? `已加入书架:${resolved.join('、')}` : `订阅接口返回:${add.body.slice(0, 200)}`);
+        }
       }
 
       let books;

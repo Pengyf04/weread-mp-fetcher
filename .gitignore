@@ -11,5 +11,8 @@ quota.json
 out/
 *.out.json
 
+# 本地工作文档(含个人环境与实测细节),不入库
+plan.md
+
 node_modules/
 .DS_Store
