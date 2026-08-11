@@ -153,9 +153,39 @@ reviews[]            ← 一条 = 一次群发
 
 CDP 的 `Runtime.evaluate` 只能走 WebSocket，没有纯 HTTP 的替代。而 Node 20 及更早没有全局 `WebSocket`，引入 `ws` 包又违背零依赖的初衷——所以 `lib/cdp.mjs` 里自己实现了一个最小 WebSocket 客户端（约 120 行，客户端帧掩码、分片重组、握手）。
 
-**一个实测坑**：有些 Chrome 配置下，`http://127.0.0.1:9222/json/version` 这类 HTTP 端点会返回 404，但 WebSocket 一直可用。所以工具优先从用户数据目录下的 `DevToolsActivePort` 文件读端口和浏览器 WebSocket 路径（第 1 行端口、第 2 行路径），HTTP 探测只作为兜底。只依赖 `/json` 的实现会在这些机器上直接跑不起来。
-
 另一个坑：`Target.createTarget` 会**立刻返回**，那一刻页面还停在 `about:blank`。不等它真正导航过去就执行 JS，拿到的是空白页——每个第一次使用、还没有阅读器标签页的人都会撞上。所以 `createTab` 里加了轮询等待。
+
+### 端口发现：两条路，各自覆盖一种模式
+
+> 以下均**实测于 2026-08-11，Chrome 151**。这一节的结论是**版本相关**的，Chrome 每 4 周一个大版本。
+
+工具有两条发现端口/WebSocket 路径的路：读用户数据目录下的 `DevToolsActivePort` 文件（第 1 行端口、第 2 行浏览器级 WS 路径），以及 HTTP 探 `/json/version`。**它们不是"主路径 + 兜底"的关系，而是各管一种启动模式**：
+
+| 模式 | `DevToolsActivePort` 文件 | `/json/version` | 实际走哪条 |
+|---|---|---|---|
+| 传统模式（`--remote-debugging-port` + 专用 `--user-data-dir`） | ❌ **不写**（Chrome 151 实测，有头/headless 都不写） | ✅ 200 | HTTP |
+| auto-connect（`chrome://inspect` 里的 "Allow remote debugging for this browser instance"，Chrome ≥ 144） | ✅ 写（端口 + `/devtools/browser/<UUID>`） | ❌ **404** | 文件 |
+
+也就是说，**推荐路径（专用 profile）实际走的是 HTTP 那条，文件那条根本拿不到**——早期文档写的"优先读文件、HTTP 只作兜底"在 Chrome 151 上已经与事实不符，这里更正。
+
+另外三条同样是实测、同样会让人白花时间的：
+
+- **Chrome 136（2025-04）起，在默认用户数据目录上 `--remote-debugging-port` 被静默忽略**（[官方说明](https://developer.chrome.com/blog/remote-debugging-port)）。端口不会开，**也不报错**。
+- **端口冲突不报错**：9222 已被别的实例占用时，第二个实例静默退到 IPv6 `[::1]:9222`。此时 `curl http://127.0.0.1:9222/json/version` 打到的是**前一个**实例（返回 404），看起来像"端口开了但工具不认"。所以文档一律用 9333。
+- **同一个 `--user-data-dir` 同时只能有一个 Chrome 进程**。目录已被占用时再带参数启动，只会打印「正在现有的浏览器会话中打开」并给旧进程开个新窗口，**新参数全部被静默忽略**。排查"参数没生效"时先查这条。
+
+### 两条路的取舍：为什么默认推荐专用 profile
+
+实测对照（2026-08-11，Chrome 151）：
+
+| | 专用 profile（方案 A） | auto-connect（方案 B） |
+|---|---|---|
+| 建立连接 | 直接握手成功，**全程无授权弹窗** | **每次新连接都要人工点一次「允许」**：点了 2.6s 握手成功；不点则挂起（实测 60s、90s）；第二次连接不点仍挂起 12s → **授权不跨连接复用** |
+| `/json/version` | 200 | 404 |
+| 登录态 | 存在专用目录里，Chrome 完全退出后重启**仍保持登录** | 就是你日常那个 profile |
+| 能否无人值守 | ✅ | ❌ |
+
+结论：auto-connect 解决的是"既要默认 profile 又要开调试"，代价是每次连接都要人工确认——对一个命令行工具来说这个代价太大。所以默认推荐专用 profile，auto-connect 作备选并写明代价。这不是 Chrome 的缺陷，是它有意的安全设计，工具不去绕过。
 
 ---
 

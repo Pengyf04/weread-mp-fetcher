@@ -16,8 +16,8 @@
   "_requestIntervalMs": "每个公众号之间的间隔毫秒数。别调到 1000 以下。",
   "requestIntervalMs": 3000,
 
-  "_chromePort": "留空则自动从 Chrome 的 DevToolsActivePort 文件里读。手动指定时填 9222 这类端口号。",
-  "chromePort": null,
+  "_chromePort": "方案A(推荐,专用 profile): 填 9333。方案B(auto-connect,用日常 Chrome): 留 null,让工具从默认 profile 目录的 DevToolsActivePort 里读。不用 9222:它是各类调试工具的事实默认端口,极易被占,而且端口冲突不报错(静默退到 IPv6),排查起来很费时间。",
+  "chromePort": 9333,
 
   "_statePath": "每日次数记录存放位置,不进仓库。",
   "statePath": "~/.weread-mp-fetcher/quota.json"

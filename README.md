@@ -40,8 +40,9 @@ node bin/weread.mjs --format md
 
 ```
 ① git clone + cp config.example.json config.json
-② 用 --remote-debugging-port=9222 启动 Chrome（先完全退出原来的）
-③ 在这个 Chrome 里扫码登录微信读书        ← 全程唯一需要你动手的一步
+② 用专用 profile 再开一个 Chrome（--remote-debugging-port=9333 + --user-data-dir，
+   日常那个 Chrome 不用关）
+③ 在这个新窗口里扫码登录微信读书          ← 全程唯一需要你动手的一步
 ④ node bin/weread.mjs --add <文章链接>     ← 书架空的才需要
 ⑤ 填 config.json → node bin/weread.mjs --format md
 ```
@@ -95,37 +96,75 @@ cp config.example.json config.json
 
 ### 第 2 步：让 Chrome 开着调试端口
 
-工具需要在**你已登录的那个 Chrome** 里执行 JS，所以要用调试端口启动它。
+工具需要在**一个已登录微信读书的 Chrome** 里执行 JS，所以要用调试端口启动它。
 
-> ⚠️ **先把 Chrome 完全退出**（`Cmd+Q` / 任务管理器里结束掉），否则新参数不生效。
+有两条路。**推荐方案 A**，方案 B 只在你确实不想再开一个 Chrome 实例时才用。
+
+> 本节结论基于 **Chrome 151（2026-08）实测**。Chrome 每 4 周一个大版本，行为可能变。
+
+#### 方案 A（默认推荐）：专用调试 Profile
 
 **macOS**
 
 ```bash
-"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --remote-debugging-port=9222
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+  --remote-debugging-port=9333 \
+  --user-data-dir="$HOME/.weread-mp-fetcher/chrome-profile"
 ```
 
 **Windows**（PowerShell）
 
 ```powershell
-& "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222
+& "C:\Program Files\Google\Chrome\Application\chrome.exe" `
+  --remote-debugging-port=9333 `
+  --user-data-dir="$env:USERPROFILE\.weread-mp-fetcher\chrome-profile"
 ```
 
 **Linux**
 
 ```bash
-google-chrome --remote-debugging-port=9222
+google-chrome \
+  --remote-debugging-port=9333 \
+  --user-data-dir="$HOME/.weread-mp-fetcher/chrome-profile"
 ```
 
-用你**平时那个 Chrome 配置**打开就行，登录状态都在。不要加 `--user-data-dir` 指向新目录，那等于开了一个没登录过的浏览器。
+对应的 `config.json`：
 
-> 调试端口只监听 `127.0.0.1`，外部访问不到。但开着它意味着本机程序都能控制这个 Chrome，介意的话用完正常重启一次 Chrome 即可。
+```json
+{ "chromePort": 9333 }
+```
+
+几件要知道的事：
+
+- 这是**第二个独立的 Chrome 实例**，和你日常那个**同时开着互不影响**（因为 `--user-data-dir` 不同）。**不需要退出你日常的 Chrome。**
+- 这个新窗口第一次确实是没登录的，**扫一次码就好**——登录态存在这个专用目录里，Chrome 完全退出再启动仍然保持登录（实测）。
+- **端口用 9333 不是 9222。** 9222 是各类调试工具的事实默认端口，极易被占；而且**端口冲突不会报错**——实测 9222 被占时，第二个实例会静默退到 IPv6 `[::1]:9222`，此时 `curl http://127.0.0.1:9222/json/version` 打到的是**另一个**实例、返回 404，极具迷惑性。
+- ⚠️ 同一个 `--user-data-dir` **同时只能有一个 Chrome 进程**。目录已被占用时再带参数启动，只会打印「正在现有的浏览器会话中打开」并给旧进程开个新窗口，**你新加的所有参数被静默忽略**。所以「改了参数没生效」时，先确认这个专用实例是不是已经在跑。
+- ⚠️ **Chrome 136（2025-04）起，在默认用户数据目录上 `--remote-debugging-port` 会被静默忽略**（[官方说明](https://developer.chrome.com/blog/remote-debugging-port)），端口根本不会开，而且**没有任何报错**。所以 `--user-data-dir` 不是可选项。
+
+> 调试端口只监听 `127.0.0.1`，外部访问不到。但开着它意味着本机程序都能控制这个 Chrome，介意的话用完把这个专用实例关掉即可（不影响你日常那个）。
+
+#### 方案 B（备选，不推荐做日常）：用你正在用的那个 Chrome
+
+Chrome ≥ 144 提供了一个开关，可以在**默认 profile** 上开调试：`chrome://inspect/#remote-debugging` → 打开 **"Allow remote debugging for this browser instance"**（[官方说明](https://developer.chrome.com/blog/chrome-devtools-mcp-debug-your-browser-session)）。
+
+选它之前必须知道（实测）：
+
+- **工具每建立一次新连接，你都要切到 Chrome 手动点一次「允许」。** 点了约 2.6 秒握手成功；不点就一直挂着（实测 60 秒 / 90 秒），而且**授权不跨连接复用**。→ **不能自动化、不能定时跑、不能无人值守。**
+- 这个模式下 `http://127.0.0.1:<端口>/json/version` 返回 **404**，工具改从**默认 profile 目录**下的 `DevToolsActivePort` 文件里读端口和 WebSocket 路径。
+- 对应的 `config.json` 是**两项都留空**（照抄方案 A 的配置会两处都指错）：
+
+  ```json
+  { "chromePort": null, "chromeProfileDir": null }
+  ```
+
+「每次都要点允许」是 Chrome 的设计，本工具不会也不应该绕过它。
 
 ### 第 3 步：登录微信读书
 
-在这个 Chrome 里打开 <https://weread.qq.com/>，**微信扫码登录**。
+在**第 2 步启动的那个 Chrome** 里打开 <https://weread.qq.com/>，**微信扫码登录**。
 
-**就这一步需要你动手，剩下的工具全自动。**
+**就这一步需要你动手，剩下的工具全自动。**（方案 A 第一次是空白 profile，扫一次码之后长期有效。）
 
 ### 第 4 步：把想看的公众号加进来
 
@@ -246,7 +285,20 @@ $ node bin/weread.mjs
 不能。微信读书网页端搜不到公众号（实测 `/web/search/global` 加 `type`/`scope` 等参数返回的都是书；MP 专用端点全 404）。用 `--add <文章链接>` 代替，效果一样且更可靠。
 
 **找不到 Chrome 调试端口**
-确认启动 Chrome 时带了 `--remote-debugging-port=9222`，并且启动前已经**完全退出**了原来的 Chrome。也可以在 `config.json` 里显式写 `"chromePort": 9222`。
+先跑一条 curl，按结果对号入座（把 9333 换成你实际用的端口）：
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:9333/json/version
+```
+
+| 结果 | 含义 | 怎么办 |
+|---|---|---|
+| `200` | 方案 A 正常 | 直接跑工具 |
+| `404` | 你连到的是一个方案 B（auto-connect）实例，不是方案 A 的专用实例 | 换个端口重开专用实例，或确认启动命令真的生效了 |
+| `000` / 拒绝连接 | 端口没开 | 两个常见原因：① 参数加在了**默认用户数据目录**上（Chrome 136+ 会静默忽略）；② 那个专用目录**已经有一个 Chrome 进程在跑**，新参数被静默忽略 |
+| 工具挂起几十秒没输出 | 多半是方案 B 在等你点「允许」 | 切到 Chrome 点一下，或改用方案 A |
+
+也可以在 `config.json` 里显式写 `"chromePort": 9333`。
 
 ---
 
