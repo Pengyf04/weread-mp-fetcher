@@ -798,6 +798,18 @@ const mkResult = (sources) => ({ onReader: true, meta: { pages: 1, requestsTotal
   assert.ok(note.includes('观察到'));
   assert.ok(note.includes('不对 -2041 的原因下结论'));
   ok('文案只陈述观察,不断定因果(无「原因是/因为/说明被限流」)');
+
+  // 注解只配给真的探过书架的值。「未检查」时那句"可用说明登录态还在"读不通,不许拼上去
+  const HINT = '← 可用说明登录态还在';
+  const skipped = format2041Note({ reloadNote: '已刷新', probeVerdict: 'ready', shelfSignal: '未检查' });
+  assert.ok(skipped.includes('/web/shelf/sync: 未检查'), '值本身照常如实显示');
+  assert.ok(!skipped.includes(HINT), '未检查时不该拼那句注解');
+  for (const banned of ['原因是', '因为', '说明被限流']) assert.ok(!skipped.includes(banned));
+  for (const sig of ['可用', '不可用']) {
+    const n = format2041Note({ reloadNote: '已刷新', probeVerdict: 'ready', shelfSignal: sig });
+    assert.ok(n.includes(`/web/shelf/sync: ${sig}   ${HINT}`), `${sig} 时注解要在`);
+  }
+  ok('书架那行的注解只在真的探过时才出现(未检查时不拼读不通的话)');
 }
 
 // ---------- 翻页回归基线 ----------
