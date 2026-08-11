@@ -1,5 +1,7 @@
 # weread-mp-fetcher
 
+[![CI](https://github.com/Pengyf04/weread-mp-fetcher/actions/workflows/ci.yml/badge.svg)](https://github.com/Pengyf04/weread-mp-fetcher/actions/workflows/ci.yml)
+
 **通过微信读书，把你关注的公众号最新文章抓成一份列表。**
 
 ```bash
