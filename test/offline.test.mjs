@@ -238,6 +238,42 @@ fs.writeFileSync(st, JSON.stringify(raw));
 assert.equal(quota.check(st, 2).count, 0, '跨天应归零');
 ok('跨天自动归零');
 
+// ---- 第二道闸门:请求预算 + 账本明细 ----
+const today = new Date();
+const p2d = (n) => String(n).padStart(2, '0');
+const TODAY = `${today.getFullYear()}-${p2d(today.getMonth() + 1)}-${p2d(today.getDate())}`;
+
+// 老账本(只有 date/count,没有 requests)必须能读,缺的字段按 0 算
+const st2 = path.join(tmp, 'old.json');
+fs.writeFileSync(st2, JSON.stringify({ date: TODAY, count: 1 }));
+assert.equal(quota.check(st2, 2).count, 1, '老账本的 count 要读出来');
+assert.deepEqual(quota.status(st2, 2, 40).requests, { articles: 0, shelf: 0, used: 0, max: 40 });
+ok('老格式账本能读,缺失的请求明细按 0 算');
+
+// commit 记的是**实际**发生数
+quota.commit(st2, { articles: 12, shelf: 1 });
+const after = JSON.parse(fs.readFileSync(st2, 'utf8'));
+assert.equal(after.count, 2);
+assert.deepEqual(after.requests, { articles: 12, shelf: 1 });
+assert.deepEqual(Object.keys(after.requests).sort(), ['articles', 'shelf'], '账本明细只有 articles / shelf');
+ok('commit 记实际请求数,账本字段是 {articles, shelf}');
+
+// 回滚兼容:新账本被老代码读到时,多出来的字段只是被忽略,count 仍然正确
+assert.equal(after.date, TODAY);
+assert.equal(typeof after.count, 'number');
+ok('新账本对老代码是向后兼容的(多余字段被忽略,date/count 位置不变)');
+
+// 预算闸门:只读不写
+const before = fs.readFileSync(st2, 'utf8');
+assert.equal(quota.checkRequests(st2, 40, 12).ok, true, '13 + 12 = 25 ≤ 40,放行');
+const tight = quota.checkRequests(st2, 20, 12);
+assert.equal(tight.ok, false, '13 + 12 = 25 > 20,拒绝');
+assert.equal(tight.used, 13);
+assert.equal(tight.remaining, 7);
+assert.equal(quota.checkRequests(st2, 0, 999).ok, true, 'maxRequestsPerDay=0 表示不限制');
+assert.equal(fs.readFileSync(st2, 'utf8'), before, 'checkRequests 必须只读不写');
+ok('请求预算闸门:够就放行、不够就拒绝、设 0 不限制,且只读不写');
+
 fs.rmSync(tmp, { recursive: true, force: true });
 
 // ---------- 参数解析 ----------
@@ -316,7 +352,7 @@ assert.equal(imported.stderr, '', `import 时 stderr 必须为空,实际:${impor
 ok(`被 import 时不执行 main()(stdout/stderr 均空,端口 ${deadPort} 实测无人监听)`);
 
 // 正向:CLI 入口没有被守卫关死。--quota 在 connectChrome 之前,零网络零额度。
-const quotaLine = /^今日\(\d{4}-\d{2}-\d{2}\)已抓 0\/2 次\n$/;
+const quotaLine = /^今日\(\d{4}-\d{2}-\d{2}\)已抓 0\/2 次;请求 0\/40\(文章 0,书架 0\)\n$/;
 const direct = runCapture([path.join(ROOT, 'bin/weread.mjs'), '--config', guardCfg, '--quota']);
 assert.equal(direct.code, 0);
 assert.match(direct.stdout, quotaLine, `stdout 必须恰好是那一行,实际:${JSON.stringify(direct.stdout)}`);
