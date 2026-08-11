@@ -274,6 +274,21 @@ assert.equal(quota.checkRequests(st2, 0, 999).ok, true, 'maxRequestsPerDay=0 表
 assert.equal(fs.readFileSync(st2, 'utf8'), before, 'checkRequests 必须只读不写');
 ok('请求预算闸门:够就放行、不够就拒绝、设 0 不限制,且只读不写');
 
+// 未知键(顶层 + requests 内部)必须原样保留:将来某版写了新字段,回滚到本版再 commit
+// 一次不能把它静默抹掉。但**保留不等于计入** —— used 仍然只数 articles + shelf。
+const st3 = path.join(tmp, 'unknown.json');
+fs.writeFileSync(
+  st3,
+  JSON.stringify({ date: TODAY, count: 1, note: '顶层未知键', requests: { articles: 3, shelf: 1, mystery: 7 } })
+);
+assert.equal(quota.checkRequests(st3, 40, 1).used, 4, 'used 只数 articles + shelf,未知键不参与计算');
+quota.commit(st3, { articles: 2 });
+const kept = JSON.parse(fs.readFileSync(st3, 'utf8'));
+assert.equal(kept.note, '顶层未知键', '顶层未知键要留着');
+assert.equal(kept.requests.mystery, 7, 'requests 内部的未知键同样要留着');
+assert.deepEqual({ a: kept.requests.articles, s: kept.requests.shelf, c: kept.count }, { a: 5, s: 1, c: 2 });
+ok('账本里的未知键(顶层与 requests 内部)原样保留,且不被计入 used');
+
 fs.rmSync(tmp, { recursive: true, force: true });
 
 // ---------- 参数解析 ----------
