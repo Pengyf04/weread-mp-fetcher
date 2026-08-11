@@ -19,6 +19,7 @@ import { has, val, valOpt } from '../lib/args.mjs';
 import { fmtTime, fmtStamp, toMarkdown } from '../lib/render.mjs';
 import { normalizeOut, writeText } from '../lib/save.mjs';
 import { fetchAll, diagnose2041, format2041Note } from '../lib/fetchflow.mjs';
+import { connectChrome, CONNECT_HELP } from '../lib/cdp.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -825,6 +826,70 @@ const mkResult = (sources) => ({ onReader: true, meta: { pages: 1, requestsTotal
     assert.ok(n.includes(`/web/shelf/sync: ${sig}   ${HINT}`), `${sig} 时注解要在`);
   }
   ok('书架那行的注解只在真的探过时才出现(未检查时不拼读不通的话)');
+}
+
+// ---------- Chrome 连接报错文案 ----------
+// 用户照着报错做,必须和照着 README 做是同一件事。全程零网络:不连 Chrome、不发任何请求。
+console.log('Chrome 连接报错文案');
+
+{
+  const README = fs.readFileSync(path.join(ROOT, 'README.md'), 'utf8');
+  // 关键 token 两边都得在 —— 改了 README 不改报错(或反过来)会在这里当场失败
+  for (const token of [
+    '--remote-debugging-port=9333',
+    '--user-data-dir',
+    '.weread-mp-fetcher/chrome-profile',
+    'chrome://inspect/#remote-debugging',
+    'Allow remote debugging for this browser instance',
+  ]) {
+    assert.ok(README.includes(token), `README 里应该有:${token}`);
+    assert.ok(CONNECT_HELP.includes(token), `连接报错文案里应该有:${token}`);
+  }
+  // 旧写法「请用 --remote-debugging-port=9222 启动 Chrome」必须绝迹
+  assert.ok(!CONNECT_HELP.includes('9222'), '报错文案里不许再出现 9222');
+  // 「两个参数缺一不可」:凡提到端口参数的行,必须同时提到 --user-data-dir。
+  // 这一条正是 Chrome 136 那个静默失效坑的靶子 —— 只写端口的指引会把人带沟里。
+  for (const line of CONNECT_HELP.split('\n')) {
+    if (line.includes('--remote-debugging-port')) {
+      assert.ok(line.includes('--user-data-dir'), `这一行只提了端口、没提目录:${line}`);
+    }
+  }
+  ok('连接指引与 README 一致:9333 + user-data-dir 缺一不可、含方案B 开关、无 9222 旧写法');
+}
+
+{
+  const cdpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wmf-cdp-'));
+
+  // (a) 端口都找不到:空 profile 目录里没有 DevToolsActivePort,连 fetch 都走不到
+  await assert.rejects(
+    () => connectChrome({ profileDir: cdpDir }),
+    (e) => {
+      assert.ok(e.message.includes('找不到 Chrome 的调试端口'), e.message);
+      assert.ok(e.message.includes(CONNECT_HELP), '双方案指引必须真的出现在报错正文里');
+      assert.ok(!e.message.includes('9222'));
+      return true;
+    }
+  );
+
+  // (b) 拿不到 wsPath:用假 fetch 挡住,连一个 socket 都不建立
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    throw new Error('离线测试:不许真的发请求');
+  };
+  try {
+    await assert.rejects(
+      () => connectChrome({ port: 9333, profileDir: cdpDir }),
+      (e) => {
+        assert.ok(e.message.includes('拿不到浏览器 WebSocket 路径'), e.message);
+        assert.ok(e.message.includes(CONNECT_HELP), '双方案指引必须真的出现在报错正文里');
+        return true;
+      }
+    );
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  fs.rmSync(cdpDir, { recursive: true, force: true });
+  ok('两处连接失败的报错都带上了双方案指引(零网络:空 profile 目录 + 假 fetch)');
 }
 
 // ---------- 翻页回归基线 ----------
