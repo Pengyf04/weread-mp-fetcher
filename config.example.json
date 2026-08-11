@@ -13,8 +13,11 @@
   "_maxRunsPerDay": "每天最多抓几次。防风控用,别调太大。设 0 表示不限制(不推荐)。",
   "maxRunsPerDay": 2,
 
-  "_requestIntervalMs": "每个公众号之间的间隔毫秒数。别调到 1000 以下。",
+  "_requestIntervalMs": "每两个请求之间的间隔毫秒数(跨页也跨号统一计)。别调到 1000 以下。",
   "requestIntervalMs": 3000,
+
+  "_maxPagesPerRun": "命令行 --pages N 的上限,超过直接拒绝执行(不截断)。1 页 ≈ 20 次群发 ≈ 70-80 篇(因号而异);请求数 = 公众号个数 × N,比如 4 个号 --pages 3 就是 12 个请求。翻页只做命令行参数,不放在这里 —— 免得哪天你只想看一眼却发出十几个请求。",
+  "maxPagesPerRun": 3,
 
   "_chromePort": "方案A(推荐,专用 profile): 填 9333。方案B(auto-connect,用日常 Chrome): 留 null,让工具从默认 profile 目录的 DevToolsActivePort 里读。不用 9222:它是各类调试工具的事实默认端口,极易被占,而且端口冲突不报错(静默退到 IPv6),排查起来很费时间。",
   "chromePort": 9333,

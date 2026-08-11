@@ -12,12 +12,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
-import { PROBE_JS, buildFetchJs, LIST_SHELF_JS } from '../lib/scripts.mjs';
+import { PROBE_JS, buildPageJs, LIST_SHELF_JS } from '../lib/scripts.mjs';
 import { extractBiz, bizToBookId, resolveBookId } from '../lib/mp.mjs';
 import * as quota from '../lib/quota.mjs';
 import { has, val, valOpt } from '../lib/args.mjs';
 import { fmtTime, fmtStamp, toMarkdown } from '../lib/render.mjs';
 import { normalizeOut, writeText } from '../lib/save.mjs';
+import { fetchAll } from '../lib/fetchflow.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -134,17 +135,27 @@ assert.equal(
 );
 ok('正文很短但 title 正常 → ready(不能拿正文长度当判据)');
 
-// ---------- 抓取脚本 ----------
+// ---------- 抓取脚本(一次调用 = 一页) ----------
 console.log('抓取脚本');
 
-const js = buildFetchJs([{ name: '甲', bookId: 'MP_WXS_1111111111' }], 1234);
-assert.ok(js.includes('MP_WXS_1111111111'), '公众号应被烘焙进脚本');
-assert.ok(js.includes('1234'), '间隔应被烘焙进脚本');
-ok('配置(公众号列表、请求间隔)正确注入');
-// 注:「有没有只取 subReviews[0]」不能靠搜字符串判断——注释里就写着这几个字。
-//    只有下面那个跑一遍的行为测试才算数。
+// 在 vm 里真跑一遍,记录**真实请求的 URL** 与返回值。
+// 注:「有没有只取 subReviews[0]」「有没有混进 count=」都不能靠搜源码字符串判断
+//    ——注释和字面量里本来就有这些字。只有跑一遍的行为测试才算数。
+async function runPageJs(bookId, offset, resp, { reject = false } = {}) {
+  let requested = null;
+  const s = await vm.runInNewContext(buildPageJs(bookId, offset), {
+    location: { pathname: '/web/mp/reader/x' },
+    fetch: (u) => {
+      requested = u;
+      return reject ? Promise.reject(new Error('boom')) : Promise.resolve({ json: () => Promise.resolve(resp) });
+    },
+    Promise,
+    JSON,
+    String,
+  });
+  return { requested, out: JSON.parse(s) };
+}
 
-// 用假 fetch 跑一遍,确认一次群发里的多篇文章都被展开
 const groups = {
   reviews: [
     {
@@ -156,18 +167,26 @@ const groups = {
     },
   ],
 };
-const out = JSON.parse(
-  await vm.runInNewContext(js, {
-    location: { pathname: '/web/mp/reader/x' },
-    fetch: () => Promise.resolve({ json: () => Promise.resolve(groups) }),
-    setTimeout: (fn) => fn(),
-    Promise,
-    JSON,
-  })
-);
-assert.equal(out.sources[0].items.length, 2, '同一次群发的两篇都要取到');
-assert.equal(out.sources[0].items[0].url, 'https://mp.weixin.qq.com/s/AAA');
+
+const p1 = await runPageJs('MP_WXS_1111111111', 40, groups);
+assert.equal(p1.requested, '/web/mp/articles?bookId=MP_WXS_1111111111&offset=40', '请求的 URL 必须逐字如此');
+assert.ok(!p1.requested.includes('count='), 'count 被服务端忽略,不许发');
+assert.ok(!p1.requested.includes('maxIdx='), 'maxIdx 被服务端忽略,不许发');
+ok('实际请求的 URL 只带 bookId 与 offset(不含 count / maxIdx)');
+
+assert.equal(p1.out.ok, true);
+assert.equal(p1.out.reviews, 1, 'reviews 报的是**群发条数**,翻页靠它累加 offset');
+assert.equal(p1.out.items.length, 2, '同一次群发的两篇都要取到');
+assert.equal(p1.out.items[0].url, 'https://mp.weixin.qq.com/s/AAA');
+assert.equal(p1.out.onReader, true);
 ok('一次群发含多篇时全部展开,原文链接拼接正确');
+
+const p2 = await runPageJs('B', 0, { errCode: -2041 });
+assert.deepEqual(p2.out, { ok: false, errCode: -2041 }, '错误码要原样带回来给 Node 侧');
+const p3 = await runPageJs('B', 0, null, { reject: true });
+assert.equal(p3.out.ok, false);
+assert.ok(String(p3.out.err).includes('boom'));
+ok('页内失败的两条路径(errCode / 抛异常)都 resolve 成字符串,不会让 JSON.parse 炸');
 
 // ---------- bookId 推导 ----------
 console.log('bookId 推导');
@@ -372,6 +391,235 @@ ok('md 数据行数 === 本次篇数(md 不加文件头、不加统计行)');
 
 fs.rmSync(outTmp, { recursive: true, force: true });
 
+// ---------- 翻页调度 ----------
+console.log('翻页调度(fetchflow)');
+
+const ACC2 = [
+  { name: '甲号', bookId: 'B1' },
+  { name: '乙号', bookId: 'B2' },
+];
+const ACC4 = [
+  { name: '甲号', bookId: 'B1' },
+  { name: '乙号', bookId: 'B2' },
+  { name: '丙号', bookId: 'B3' },
+  { name: '丁号', bookId: 'B4' },
+];
+/** 一页成功的返回。reviews = 该页的群发条数,offset 靠它累加 */
+const page = (reviews, items = []) => ({ ok: true, onReader: true, reviews, items });
+const art = (t, id) => ({ t, title: '文章' + id, url: 'https://mp.weixin.qq.com/s/' + id, rid: 'r' + id });
+
+function mkRun(handler) {
+  const calls = [];
+  const fn = async (bookId, offset) => {
+    calls.push({ bookId, offset });
+    return handler(bookId, offset, calls.length - 1);
+  };
+  fn.calls = calls;
+  fn.offsetsOf = (bookId) => calls.filter((c) => c.bookId === bookId).map((c) => c.offset);
+  return fn;
+}
+function mkSleep() {
+  const s = async () => {
+    s.n++;
+  };
+  s.n = 0;
+  return s;
+}
+// bin 里的"全失败"判据,逐字照抄过来当断言用
+const allFailed = (r) => r.sources.filter((s) => s.err).length === r.sources.length;
+
+// 1. ⚠️ E1 的直接靶子:offset 必须**按号重置**。单号测试对这个 bug 完全免疫,所以必须 ≥2 个号。
+{
+  const run = mkRun(() => page(20));
+  const sleep = mkSleep();
+  const r = await fetchAll({ accounts: ACC2, pages: 3, gapMs: 3000, run, sleep });
+  assert.deepEqual(run.offsetsOf('B1'), [0, 20, 40], '第 1 个号的 offset 序列');
+  assert.deepEqual(run.offsetsOf('B2'), [0, 20, 40], '第 2 个号必须也从 0 开始 —— offset 写在号循环外就会是 60,80,100');
+  assert.equal(r.meta.requestsTotal, 6);
+  assert.equal(r.meta.pages, 3);
+  ok('2 个号 × 3 页:每个号的 offset 都是 0,20,40(offset 按号重置)');
+
+  // 8. GAP 加在每两个请求之间,最后一个请求之后不等
+  assert.equal(sleep.n, 5, 'sleep 次数必须是 实际请求数 − 1');
+  ok('间隔次数 === 实际请求数 − 1(尾部没有多余等待)');
+}
+
+// 3. 某页返回 0 条群发 → 提前停,后续不再请求
+{
+  const run = mkRun((b, o, i) => (i === 1 ? page(0) : page(20)));
+  const r = await fetchAll({ accounts: [ACC2[0]], pages: 3, gapMs: 0, run, sleep: mkSleep() });
+  assert.equal(run.calls.length, 2, '第 2 页就没有更多了,不该再打第 3 页');
+  assert.equal(r.sources[0].pagesFetched, 2);
+  assert.ok(!r.sources[0].err && !r.sources[0].partialErr, '没有更多 ≠ 失败');
+  ok('某页 0 条群发 → 提前停止,且不算失败');
+}
+
+// 4 + 5 + 13. 去重:跨页同 url 只留一条;同一次群发的同 t 两篇都在;url/rid 皆空的不参与去重
+{
+  const run = mkRun((b, o, i) =>
+    i === 0
+      ? page(20, [art(100, 'AAA'), art(100, 'BBB')]) // 同一次群发,t 相同
+      : page(20, [art(100, 'AAA'), art(90, 'CCC')]) // AAA 与上一页重复
+  );
+  const r = await fetchAll({ accounts: [ACC2[0]], pages: 2, gapMs: 0, run, sleep: mkSleep() });
+  const urls = r.sources[0].items.map((it) => it.url);
+  assert.equal(urls.length, 3, '重复的 AAA 只能出现一次');
+  assert.equal(new Set(urls).size, 3);
+  assert.equal(r.sources[0].items.filter((it) => it.t === 100).length, 2, '同 t 的两篇都要在(不能按时间戳去重)');
+  ok('跨页按 url 去重;同一次群发的同时间戳文章不会被误删');
+
+  const runEmpty = mkRun(() =>
+    page(20, [
+      { t: 5, title: '甲', url: '', rid: '' },
+      { t: 4, title: '乙', url: '', rid: '' },
+      { t: 3, title: '丙', url: 'https://mp.weixin.qq.com/s/X', rid: '' },
+      { t: 2, title: '丁', url: 'https://mp.weixin.qq.com/s/X', rid: '' },
+    ])
+  );
+  const r2 = await fetchAll({ accounts: [ACC2[0]], pages: 1, gapMs: 0, run: runEmpty, sleep: mkSleep() });
+  assert.equal(r2.sources[0].items.length, 3, 'url/rid 皆空的两条都要保留,同 url 的两条合成一条');
+  ok('去重键为空时不参与去重(否则会静默丢文章)');
+}
+
+// 6. 第 0 页失败 → {name,bookId,err},没有 items
+{
+  const run = mkRun(() => ({ ok: false, errCode: -2041 }));
+  const r = await fetchAll({ accounts: [ACC2[0]], pages: 3, gapMs: 0, run, sleep: mkSleep() });
+  assert.deepEqual(Object.keys(r.sources[0]).sort(), ['bookId', 'err', 'name']);
+  assert.equal(run.calls.length, 1, '第 0 页就失败了,不该继续翻页');
+  assert.equal(allFailed(r), true);
+  ok('第 0 页失败 → 形状 {name,bookId,err},且停止该号翻页');
+}
+
+// 7. 第 2 页失败 → 保留前 2 页 + partialErr,**不设 err** → 整轮不算全失败
+{
+  const run = mkRun((b, o, i) => (i === 2 ? { ok: false, errCode: -2041 } : page(20, [art(100 - i, 'X' + i)])));
+  const r = await fetchAll({ accounts: [ACC2[0]], pages: 3, gapMs: 0, run, sleep: mkSleep() });
+  const s = r.sources[0];
+  assert.equal(s.err, undefined, 'err 只表示该号零数据');
+  assert.equal(s.partialErr, 'errCode=-2041');
+  assert.equal(s.pagesFetched, 2);
+  assert.equal(s.items.length, 2, '前 2 页的文章必须保住');
+  assert.equal(allFailed(r), false, '已经花掉的请求必须有产出');
+  ok('第 2 页失败 → items + partialErr,无 err,不判全失败');
+}
+
+// 10. run() 在第 2 页抛错 → 同样归到 partialErr;后续号照常;异常不穿透
+{
+  const run = mkRun((b, o, i) => {
+    if (b === 'B1' && i === 2) throw new Error('target closed');
+    return page(20, [art(100, b + i)]);
+  });
+  const r = await fetchAll({ accounts: ACC2, pages: 3, gapMs: 0, run, sleep: mkSleep() });
+  assert.equal(r.sources[0].err, undefined);
+  assert.ok(String(r.sources[0].partialErr).includes('evaluate 失败'));
+  assert.equal(r.sources[0].items.length, 2);
+  assert.ok(run.calls.some((c) => c.bookId === 'B2'), '后面的号仍要继续抓');
+  assert.equal(allFailed(r), false);
+  ok('run() 抛错(CDP 层)按页号映射进已有形状,不新造结构、不穿透 fetchAll');
+}
+
+// 11. run() 在第 0 页抛错 → 归形状 1
+{
+  const run = mkRun(() => {
+    throw new Error('target closed');
+  });
+  const r = await fetchAll({ accounts: [ACC2[0]], pages: 3, gapMs: 0, run, sleep: mkSleep() });
+  assert.deepEqual(Object.keys(r.sources[0]).sort(), ['bookId', 'err', 'name']);
+  assert.ok(r.sources[0].err.includes('evaluate 失败'));
+  ok('第 0 页 run() 抛错 → 归形状 1(err)');
+}
+
+// 12. 熔断器:连续 2 个号在第 0 页抛错 → 剩下的号一次都不请求
+{
+  const run = mkRun((b) => {
+    if (b === 'B1' || b === 'B2') throw new Error('socket 已断');
+    return page(20);
+  });
+  const r = await fetchAll({ accounts: ACC4, pages: 1, gapMs: 0, run, sleep: mkSleep() });
+  assert.equal(run.calls.filter((c) => c.bookId === 'B3' || c.bookId === 'B4').length, 0, '熔断后不该再打请求');
+  assert.equal(r.sources[2].err, '未尝试:上游连续失败');
+  assert.equal(r.sources[3].err, '未尝试:上游连续失败');
+  assert.equal(r.meta.requestsTotal, 2);
+  assert.equal(allFailed(r), true, '4 个号全零数据 → 与改动前同义:不输出、不记账');
+  ok('熔断器:连续 2 次 CDP 抛错后停手,剩余号记 err(不是 partialErr)');
+}
+
+// 15. ⚠️ E6 的直接靶子:熔断器**只数 run() 抛错**,不数 errCode 类失败
+{
+  const run = mkRun((b) => (b === 'B4' ? page(20) : { ok: false, errCode: -2041 }));
+  const r = await fetchAll({ accounts: ACC4, pages: 1, gapMs: 0, run, sleep: mkSleep() });
+  assert.ok(run.calls.some((c) => c.bookId === 'B4'), '前 3 个号都 -2041 也不该熔断');
+  assert.equal(r.meta.requestsTotal, 4, '总请求数 = 号数 × 1');
+  ok('errCode 类失败(含 -2041)不触发熔断 —— 与改动前行为一致,不是缺陷');
+}
+
+// 14. ⚠️ E2 的直接靶子:四种错误文案逐条钉死(下游的 -2041 判定就靠它)
+{
+  const cases = [
+    [() => ({ ok: false, errCode: -2041 }), 'errCode=-2041'],
+    [() => ({ ok: false, err: 'TypeError: Failed to fetch' }), 'TypeError: Failed to fetch'],
+  ];
+  for (const [handler, expect] of cases) {
+    const r = await fetchAll({ accounts: [ACC2[0]], pages: 1, gapMs: 0, run: mkRun(handler), sleep: mkSleep() });
+    assert.equal(r.sources[0].err, expect);
+  }
+  const rThrow = await fetchAll({
+    accounts: [ACC2[0]],
+    pages: 1,
+    gapMs: 0,
+    run: mkRun(() => {
+      throw new Error('页面里执行出错: xyz');
+    }),
+    sleep: mkSleep(),
+  });
+  assert.equal(rThrow.sources[0].err, 'evaluate 失败:页面里执行出错: xyz');
+
+  const rTrip = await fetchAll({
+    accounts: ACC4,
+    pages: 1,
+    gapMs: 0,
+    run: mkRun((b) => {
+      if (b === 'B1' || b === 'B2') throw new Error('x');
+      return page(20);
+    }),
+    sleep: mkSleep(),
+  });
+  assert.equal(rTrip.sources[3].err, '未尝试:上游连续失败');
+
+  // 这正是 bin 的 -2041 提示与 §3.5 分支所依赖的判定式
+  const r2041 = await fetchAll({
+    accounts: [ACC2[0]],
+    pages: 1,
+    gapMs: 0,
+    run: mkRun(() => ({ ok: false, errCode: -2041 })),
+    sleep: mkSleep(),
+  });
+  assert.equal(String(r2041.sources[0].err).includes('errCode=-2041'), true);
+  ok('四种错误文案钉死:errCode=<n> / 页内异常原文 / evaluate 失败:… / 未尝试:上游连续失败');
+}
+
+// toMarkdown:部分失败时,已抓到的文章照常出表格,警告附在表格**之后**
+{
+  const md = toMarkdown([
+    {
+      name: '甲号',
+      bookId: 'B1',
+      items: [art(1785636055, 'AAA'), art(1785549655, 'BBB')],
+      pagesFetched: 2,
+      partialErr: 'errCode=-2041',
+    },
+  ]);
+  const dataRows = (md.match(/^\| 20\d{2}-/gm) || []).length;
+  assert.equal(dataRows, 2, '已抓到的两条必须还在');
+  assert.ok(md.includes('第 3 页起未取到:errCode=-2041'));
+  assert.ok(md.indexOf('未取到') > md.lastIndexOf('[原文]'), '警告必须在表格之后');
+  // 渲染层不区分失败来源,只区分"有没有数据"
+  const md2 = toMarkdown([{ name: '甲号', bookId: 'B1', items: [art(1785636055, 'AAA')], pagesFetched: 1, partialErr: 'evaluate 失败:target closed' }]);
+  assert.ok(md2.includes('第 2 页起未取到:evaluate 失败'));
+  ok('部分失败的号:表格照出,警告附在表格之后');
+}
+
 // ---------- 翻页回归基线 ----------
 console.log('翻页回归基线(golden fixture)');
 
@@ -382,16 +630,36 @@ const GOLDEN_ACCOUNTS = [
   { name: '乙号', bookId: 'MP_WXS_0000000002' },
 ];
 
-const goldenNow = JSON.parse(
-  await vm.runInNewContext(buildFetchJs(GOLDEN_ACCOUNTS, 3000), {
-    location: { pathname: '/web/mp/reader/x' },
-    fetch: () => Promise.resolve({ json: () => Promise.resolve(PAGES_INPUT) }),
-    setTimeout: (fn) => fn(),
-    Promise,
-    JSON,
-  })
-);
-assert.deepEqual(goldenNow, GOLDEN, 'fixture 与当前实现不一致 —— 要么实现变了,要么 fixture 被改过');
-ok('fixture 就是当前实现的产物(P3 换成 Node 侧翻页后用它做回归)');
+// 新链路 = 页内 buildPageJs + Node 侧 fetchAll,喂**同一份**假接口响应
+const goldenNow = await fetchAll({
+  accounts: GOLDEN_ACCOUNTS,
+  pages: 1,
+  gapMs: 0,
+  run: async (bookId, offset) => (await runPageJs(bookId, offset, PAGES_INPUT)).out,
+  sleep: mkSleep(),
+});
+
+// 六条口径,缺一不可。白名单是**测试代码里的字面量**:要往产物里加字段,
+// 就得先改这一行 —— 强制把改动摆到台面上。
+const TOP_ADD_OK = ['meta'];
+const SRC_ADD_OK = ['pageMeta', 'pagesFetched'];
+const diff = (a, b) => a.filter((k) => !b.includes(k));
+
+assert.equal(goldenNow.onReader, GOLDEN.onReader, '① 顶层 onReader 不许静默消失');
+assert.equal(goldenNow.sources.length, GOLDEN.sources.length);
+for (let i = 0; i < GOLDEN.sources.length; i++) {
+  assert.equal(goldenNow.sources[i].name, GOLDEN.sources[i].name, '② name');
+  assert.equal(goldenNow.sources[i].bookId, GOLDEN.sources[i].bookId, '② bookId');
+  assert.deepEqual(goldenNow.sources[i].items, GOLDEN.sources[i].items, '③ 数据本体必须逐字段一致');
+  const added = diff(Object.keys(goldenNow.sources[i]), Object.keys(GOLDEN.sources[i]));
+  const removed = diff(Object.keys(GOLDEN.sources[i]), Object.keys(goldenNow.sources[i]));
+  assert.deepEqual(diff(added, SRC_ADD_OK), [], `⑤ source 级新增字段超出白名单:${added}`);
+  assert.deepEqual(removed, [], `⑥ source 级字段被删:${removed}`);
+}
+const addedTop = diff(Object.keys(goldenNow), Object.keys(GOLDEN));
+const removedTop = diff(Object.keys(GOLDEN), Object.keys(goldenNow));
+assert.deepEqual(diff(addedTop, TOP_ADD_OK), [], `④ 顶层新增字段超出白名单:${addedTop}`);
+assert.deepEqual(removedTop, [], `⑥ 顶层字段被删:${removedTop}`);
+ok('pages=1 的产物与改动前的 golden 六条口径全对得上(新增只有 meta / pageMeta / pagesFetched)');
 
 console.log(`\n全部通过(${passed} 项)`);
