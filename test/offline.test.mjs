@@ -20,6 +20,8 @@ import { fmtTime, fmtStamp, toMarkdown } from '../lib/render.mjs';
 import { normalizeOut, writeText } from '../lib/save.mjs';
 import { fetchAll, diagnose2041, format2041Note } from '../lib/fetchflow.mjs';
 import { connectChrome, CONNECT_HELP } from '../lib/cdp.mjs';
+// 直接 import bin 是安全的:入口守卫保证被 import 时不跑 main()(下面「CLI 入口守卫」一节验的就是它)
+import { getReaderTab, commitRun } from '../bin/weread.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -785,15 +787,17 @@ const mkResult = (sources) => ({ onReader: true, meta: { pages: 1, requestsTotal
 }
 
 {
-  // 记账点上的书架计数为什么恒为 0 —— 这是结构性事实,钉住它。
-  // (bin 在 quota.commit 那行直接写 shelf: 0,依据就是下面这两条)
+  // U4.6 的书架探测为什么进不了账本 —— 结构性事实,钉住它。
+  // ⚠️ 这里说的**只有 diagnose2041 这一次探测**。getReaderTab 推导 readerUrl 时发的那次
+  //    书架请求是另一回事:它在主路径上、会被如实记进 requests.shelf
+  //    (见下面「阅读器页与书架记账」一节)。两者的不对称是刻意的,依据就是下面这两条。
   const partial = mkResult([
     { name: '甲', bookId: 'B1', err: 'errCode=-2041' },
     { name: '乙', bookId: 'B2', items: [art(1785636055, 'AAA')], pageMeta: [], pagesFetched: 1 },
   ]);
   assert.equal(allFailed(partial), false, '有号成功 → 非全失败 → 这类运行才会走到 quota.commit');
   const d1 = await diagnose2041(partial, mkDeps().deps);
-  assert.equal(d1.shelfSignal, '未检查', '能走到记账点的运行,书架一定没被探过 → 计数只能是 0');
+  assert.equal(d1.shelfSignal, '未检查', '能走到记账点的运行,U4.6 那次探测一定没发生');
 
   const total = mkResult([
     { name: '甲', bookId: 'B1', err: 'errCode=-2041' },
@@ -802,7 +806,7 @@ const mkResult = (sources) => ({ onReader: true, meta: { pages: 1, requestsTotal
   const d2 = await diagnose2041(total, mkDeps().deps);
   assert.equal(d2.shelfSignal, '可用', '唯一会探书架的场景');
   assert.equal(allFailed(total), true, '而它必然被全失败判据拦下(return 在 commit 之前)→ 不记账');
-  ok('书架探测与记账互斥:走到记账点 ⟹ 未探书架(shelf 恒为 0),探了书架 ⟹ 全失败不记账');
+  ok('U4.6 的书架探测与记账互斥:走到记账点 ⟹ 没探过它,探了它 ⟹ 全失败不记账');
 }
 
 {
@@ -890,6 +894,130 @@ console.log('Chrome 连接报错文案');
   }
   fs.rmSync(cdpDir, { recursive: true, force: true });
   ok('两处连接失败的报错都带上了双方案指引(零网络:空 profile 目录 + 假 fetch)');
+}
+
+// ---------- 阅读器页与书架记账 ----------
+// 靶子:getReaderTab 在"没有可复用阅读器页且没配 readerUrl"时发的那 1 个真实
+// /web/shelf/sync,必须如实记进账本的 requests.shelf(用户 2026-08-11 授权的额度语义变更)。
+console.log('阅读器页与书架记账');
+
+/**
+ * 假 CDP 会话:只认 lib/cdp.mjs 真正会发的那几个方法。
+ * 用它跑的是**真实的** getReaderTab / listTabs / createTab / evaluate 代码路径,零网络。
+ */
+function fakeCdpSession({ tabs = [], shelf = [] } = {}) {
+  const pages = tabs.map((t, i) => ({
+    targetId: t.targetId || `T${i}`,
+    type: 'page',
+    title: t.title || '',
+    url: t.url,
+  }));
+  const calls = { shelfSync: 0, created: [] };
+  const attached = new Map();
+  let n = 0;
+  const session = {
+    send: async (method, params = {}, sessionId) => {
+      switch (method) {
+        case 'Target.getTargets':
+          return { targetInfos: pages };
+        case 'Target.createTarget': {
+          const t = { targetId: `NEW${++n}`, type: 'page', title: '某某 - 公众号 - 微信读书', url: params.url };
+          pages.push(t);
+          calls.created.push(params.url);
+          return { targetId: t.targetId };
+        }
+        case 'Target.attachToTarget': {
+          const sid = `S${++n}`;
+          attached.set(sid, params.targetId);
+          return { sessionId: sid };
+        }
+        case 'Target.detachFromTarget':
+          return {};
+        case 'Runtime.evaluate': {
+          const expr = params.expression;
+          if (expr === LIST_SHELF_JS) {
+            calls.shelfSync++; // ★ 这一次就是真实的 /web/shelf/sync
+            return { result: { value: JSON.stringify(shelf) } };
+          }
+          if (expr.includes('location.href')) {
+            const t = pages.find((p) => p.targetId === attached.get(sessionId));
+            return { result: { value: `${t.url}|complete` } };
+          }
+          throw new Error('假会话不认识这段 JS:' + expr.slice(0, 40));
+        }
+        default:
+          throw new Error('假会话不认识的 CDP 方法:' + method);
+      }
+    },
+  };
+  return { session, calls };
+}
+
+// getReaderTab 会往 stderr 打提示,测试里静音,免得淹掉判据
+const quiet = async (fn) => {
+  const orig = console.error;
+  console.error = () => {};
+  try {
+    return await fn();
+  } finally {
+    console.error = orig;
+  }
+};
+
+const READER_URL = 'https://weread.qq.com/web/mp/reader/xyz';
+
+// 路径 1:有可复用的阅读器标签页 → 一个请求都不发
+const A = fakeCdpSession({
+  tabs: [{ targetId: 'READER', title: '某某 - 公众号 - 微信读书', url: 'https://weread.qq.com/web/mp/reader/abc' }],
+});
+const rA = await quiet(() => getReaderTab(A.session, {}));
+assert.equal(rA.targetId, 'READER');
+assert.equal(rA.shelfRequests, 0, '复用现成的阅读器页 → 书架请求数必须是 0');
+assert.equal(A.calls.shelfSync, 0, '而且确实一次书架接口都没调');
+assert.deepEqual(A.calls.created, [], '也没有新开标签页');
+
+// 路径 2:没有可复用页、也没配 readerUrl → 真的问一次书架
+const B = fakeCdpSession({
+  tabs: [{ targetId: 'HOME', title: '微信读书', url: 'https://weread.qq.com/' }],
+  shelf: [{ name: '甲号', bookId: 'MP_WXS_1', readerUrl: READER_URL }],
+});
+const rB = await quiet(() => getReaderTab(B.session, {}));
+assert.equal(B.calls.shelfSync, 1, '推导 readerUrl 必须真的问一次书架');
+assert.equal(rB.shelfRequests, 1, '发了就得如实报出来,不能吞掉');
+assert.deepEqual(B.calls.created, [READER_URL], '并用书架里推出来的 URL 开阅读器页');
+assert.equal(rB.targetId, 'NEW2');
+
+// 路径 3:没有可复用页,但 config 写了 readerUrl → 不必问书架
+const C = fakeCdpSession({ tabs: [{ targetId: 'HOME', title: '微信读书', url: 'https://weread.qq.com/' }] });
+const rC = await quiet(() => getReaderTab(C.session, { readerUrl: READER_URL }));
+assert.equal(C.calls.shelfSync, 0, 'config 里已经有 URL 了,没有理由再问书架');
+assert.equal(rC.shelfRequests, 0);
+ok('getReaderTab 如实报出书架请求数:复用页=0、推导 readerUrl=1、config 写死 readerUrl=0');
+
+{
+  // 账目:同样两次运行,只有"问过书架"的那本账多记 1 个,并因此更早顶到预算上限
+  const acctDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wmf-shelf-'));
+  const stReuse = path.join(acctDir, 'reuse.json');
+  const stDerive = path.join(acctDir, 'derive.json');
+  const fakeResult = { onReader: true, meta: { pages: 1, requestsTotal: 4 }, sources: [] };
+
+  commitRun({ statePath: stReuse }, fakeResult, rA.shelfRequests);
+  assert.deepEqual(JSON.parse(fs.readFileSync(stReuse, 'utf8')).requests, { articles: 4, shelf: 0 });
+  assert.equal(quota.status(stReuse, 2, 40).requests.used, 4);
+
+  commitRun({ statePath: stDerive }, fakeResult, rB.shelfRequests);
+  assert.deepEqual(
+    JSON.parse(fs.readFileSync(stDerive, 'utf8')).requests,
+    { articles: 4, shelf: 1 },
+    '书架请求要落在 shelf 一栏,不能混进 articles'
+  );
+  assert.equal(quota.status(stDerive, 2, 40).requests.used, 5, 'shelf 计入 used(用户知情授权的额度语义变更)');
+
+  // 进而参与预算闸门判定 —— 这正是这次语义变更的实际后果
+  assert.equal(quota.checkRequests(stDerive, 5, 1).ok, false, 'used=5 已顶满 5 的预算 → 再要 1 个就该拒绝');
+  assert.equal(quota.checkRequests(stReuse, 5, 1).ok, true, '同样两次运行,没问书架的那本账还剩 1 个额度');
+  fs.rmSync(acctDir, { recursive: true, force: true });
+  ok('书架请求如实进账本 requests.shelf,计入 used 并参与预算闸门判定');
 }
 
 // ---------- 翻页回归基线 ----------

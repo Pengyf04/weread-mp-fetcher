@@ -70,17 +70,26 @@ async function readShelf(session, targetId) {
 /**
  * 找一个可用的阅读器标签页。
  * 抓文章必须在阅读器页上下文里发请求(首页发会 -2041),所以这一步不能省。
+ *
+ * ★ 返回 {targetId, shelfRequests}:shelfRequests 是本次**真实发出**的
+ *   /web/shelf/sync 请求数(0 或 1),交给记账点如实写进账本的 requests.shelf。
+ *   为什么不是 void:这条路径会一路走到 quota.commit,漏记就等于账本谎报敞口。
  */
-async function getReaderTab(session, cfg) {
+export async function getReaderTab(session, cfg) {
   const tabs = await listTabs(session);
   const readers = tabs.filter((t) => t.url.includes('weread.qq.com/web/mp/reader/'));
   readers.sort((a, b) => Number(b.title.includes('公众号')) - Number(a.title.includes('公众号')));
-  if (readers.length) return readers[0].targetId;
+  // 复用已开的阅读器页 → 一个请求都不发
+  if (readers.length) return { targetId: readers[0].targetId, shelfRequests: 0 };
 
   // 没有现成的就自己推导一个:配置里填了就用配置的,没填就从书架里取
   let url = cfg.readerUrl && !cfg.readerUrl.includes('<') ? cfg.readerUrl : null;
+  let shelfRequests = 0;
   if (!url) {
     const anyTab = await getAnyWereadTab(session);
+    // ★ 先加再发,与 fetchAll 里 requestsTotal++ 的口径一致:抛错的那一次也算,
+    //   因为请求很可能已经发出去了,只是结果没回来。宁可多记也不少记。
+    shelfRequests++;
     const shelf = await readShelf(session, anyTab);
     const withUrl = shelf.find((b) => b.readerUrl);
     if (!withUrl) {
@@ -97,7 +106,20 @@ async function getReaderTab(session, cfg) {
     console.error(`提示:自动使用「${withUrl.name}」的阅读器页(无需手动复制 URL)。`);
   }
   console.error('提示:没有可复用的阅读器标签页,正在打开一个。建议之后别关它,下次直接复用。');
-  return await createTab(session, url);
+  return { targetId: await createTab(session, url), shelfRequests };
+}
+
+/**
+ * 记账点。articles = 本次实际发出的文章接口请求数;shelf = 本次实际发出的书架接口请求数。
+ * 抽成函数是为了让「记的是实际值」这条规则本身可被离线测试钉住(它不做任何网络动作)。
+ *
+ * ⚠️ 只有**不算全败**的抓取运行才会走到这里 —— 调用点的位置就是这条语义,不要挪。
+ */
+export function commitRun(cfg, result, shelfRequests) {
+  return quota.commit(cfg.statePath, {
+    articles: result.meta.requestsTotal,
+    shelf: Number(shelfRequests) || 0,
+  });
 }
 
 async function probeUntilReady(session, targetId, { tries = 12, gapMs = 5000 } = {}) {
@@ -250,7 +272,9 @@ async function main() {
       return;
     }
 
-    const targetId = await getReaderTab(session, cfg);
+    // shelfRequests:推导 readerUrl 时可能真的问了一次书架(/web/shelf/sync)。
+    // 它是本次运行的真实敞口,要一路带到记账点,不能在中途丢掉。
+    const { targetId, shelfRequests } = await getReaderTab(session, cfg);
 
 
     // 先探针,再决定要不要发业务请求。探针不消耗额度,所以放在闸门前面。
@@ -323,14 +347,20 @@ async function main() {
     }
 
     // 记的是**实际发出**的请求数,不是预估值。
-    // shelf 这里写死 0,是**如实**而不是漏写:书架探测只发生在"全部号都失败"那一条路径上
-    // (diagnose2041 里 U4.6 的触发条件,与上面那条 return 的条件是同一个表达式),
-    // 而那条路径在上面就 return 了、本来就不计账。所以**能走到这一行的运行一定没探过书架**,
-    // 从 diag 去推一个"有时会是 1"的数只会误导人。这条不变式由离线测试钉住。
-    // ⚠️ 连带的已知账本口径:全失败那一轮的请求(含那 1 个书架探测)不进账本 ——
-    //    这是"不改变记账语义"(U3.8)的代价,是知情的选择,不是遗漏。
-    // ⚠️ 将来若把书架探测挪到别的路径上(或让全失败也记账),这里必须同步改回真实计数。
-    quota.commit(cfg.statePath, { articles: result.meta.requestsTotal, shelf: 0 });
+    //
+    // 全仓库一共有四处会发 /web/shelf/sync,它们进不进账本各有各的理由,**不对称是刻意的**:
+    //   1. getReaderTab 推导 readerUrl 那一次 → **记**(shelfRequests,本次改动)。
+    //      它就在本次抓取运行的主路径上,会一路走到这一行,不记就是账本谎报敞口。
+    //      代价是知情的:shelf 计入 used → 参与 checkRequests 的预算闸门判定
+    //      (用户 2026-08-11 明示授权的额度语义变更,记录见 plan §13)。
+    //   2. diagnose2041 的全失败探测(U4.6)→ **记不进来,保持 0**。触发条件与上面那条
+    //      "全部失败就 return"是同一个表达式,那条路径根本走不到这一行。这是"全失败不计额度"
+    //      (U3.8)的代价,是知情的选择,不是遗漏 —— 要改就得先改全失败的记账语义本身。
+    //   3. --shelf / --add → 不计费(U5.3),走另一条 return 分支。
+    //   4. --probe → 探针整体免费,同样在这一行之前 return;它可能也发了 1 次(走的是同一个
+    //      getReaderTab),但探针路径不 commit,所以不记。
+    // ⚠️ 将来若让全失败也记账,第 2 条必须同步改成真实计数。
+    commitRun(cfg, result, shelfRequests);
 
     // ★ 顺序:抓取 → 渲染(只发生一次) → 输出。两条输出路径共用同一个 normalizeOut,
     //   这样"文件字节流 === 不加 --out 时终端收到的字节流"是结构性成立的。
