@@ -769,6 +769,27 @@ const mkResult = (sources) => ({ onReader: true, meta: { pages: 1, requestsTotal
 }
 
 {
+  // 记账点上的书架计数为什么恒为 0 —— 这是结构性事实,钉住它。
+  // (bin 在 quota.commit 那行直接写 shelf: 0,依据就是下面这两条)
+  const partial = mkResult([
+    { name: '甲', bookId: 'B1', err: 'errCode=-2041' },
+    { name: '乙', bookId: 'B2', items: [art(1785636055, 'AAA')], pageMeta: [], pagesFetched: 1 },
+  ]);
+  assert.equal(allFailed(partial), false, '有号成功 → 非全失败 → 这类运行才会走到 quota.commit');
+  const d1 = await diagnose2041(partial, mkDeps().deps);
+  assert.equal(d1.shelfSignal, '未检查', '能走到记账点的运行,书架一定没被探过 → 计数只能是 0');
+
+  const total = mkResult([
+    { name: '甲', bookId: 'B1', err: 'errCode=-2041' },
+    { name: '乙', bookId: 'B2', err: 'errCode=-2041' },
+  ]);
+  const d2 = await diagnose2041(total, mkDeps().deps);
+  assert.equal(d2.shelfSignal, '可用', '唯一会探书架的场景');
+  assert.equal(allFailed(total), true, '而它必然被全失败判据拦下(return 在 commit 之前)→ 不记账');
+  ok('书架探测与记账互斥:走到记账点 ⟹ 未探书架(shelf 恒为 0),探了书架 ⟹ 全失败不记账');
+}
+
+{
   // 措辞是设计的一部分:只陈述观察,不下结论
   const note = format2041Note({ reloadNote: '已刷新', probeVerdict: 'captcha', shelfSignal: '可用' });
   for (const banned of ['原因是', '因为', '说明被限流']) {
