@@ -62,9 +62,38 @@ async function getAnyWereadTab(session) {
   return await createTab(session, 'https://weread.qq.com/');
 }
 
-/** 读书架:拿到已订阅公众号 + 每个号的 readerUrl(从 deepLink 推导,不用手动复制) */
-async function readShelf(session, targetId) {
-  return JSON.parse(await evaluate(session, targetId, LIST_SHELF_JS));
+/**
+ * 读书架:拿到已订阅公众号 + 每个号的 readerUrl(从 deepLink 推导,不用手动复制)。
+ *
+ * 成功返回**数组**(diagnose2041 的「Array.isArray → 可用」判据依赖这一点);
+ * 接口出错(errCode / 页内异常)抛带 isShelfApiError 标记的 Error ——
+ * 「接口出错」与「书架真的是空的」必须是两个可区分的结果,
+ * 否则登录态问题会被误诊成「你没订阅任何号」(NEW-1)。
+ */
+export async function readShelf(session, targetId) {
+  const o = JSON.parse(await evaluate(session, targetId, LIST_SHELF_JS));
+  if (!o || o.ok !== true) {
+    // 文案口径与 fetchflow 钉死的一致:errCode=<n>,人和下游判定都能从文本里认出错误码
+    const msg =
+      o && o.errCode !== undefined && o.errCode !== null
+        ? 'errCode=' + o.errCode
+        : (o && o.err) || '书架接口返回了无法识别的结果';
+    const err = new Error('书架接口出错:' + msg);
+    err.isShelfApiError = true; // 调用方靠它把「接口出错」与 CDP 层异常区分开
+    throw err;
+  }
+  return o.books;
+}
+
+/** 书架接口出错时的指引。与「书架真的是空的」(→ 建议 --add)是两码事,不能共用文案。 */
+function explainShelfError(e) {
+  return (
+    e.message +
+    '\n' +
+    (/errCode=-2010/.test(e.message)
+      ? '  -2010 = 登录已失效:在 Chrome 里重新扫码登录微信读书,然后重跑本命令。'
+      : '  通常是会话没续上:到 Chrome 里刷新一下微信读书页面再重跑;反复出现就重新扫码登录。')
+  );
 }
 
 /**
@@ -90,7 +119,15 @@ export async function getReaderTab(session, cfg) {
     // ★ 先加再发,与 fetchAll 里 requestsTotal++ 的口径一致:抛错的那一次也算,
     //   因为请求很可能已经发出去了,只是结果没回来。宁可多记也不少记。
     shelfRequests++;
-    const shelf = await readShelf(session, anyTab);
+    let shelf;
+    try {
+      shelf = await readShelf(session, anyTab);
+    } catch (e) {
+      if (!e.isShelfApiError) throw e; // CDP 层的错不属于这里,原样上抛
+      // ⚠️ 出错 ≠ 空书架:下面那句「还没有任何公众号」只许说给真空的书架听
+      console.error(explainShelfError(e) + '\n书架读不出来,也就推导不出阅读器页 URL,本次先停。');
+      process.exit(2);
+    }
     const withUrl = shelf.find((b) => b.readerUrl);
     if (!withUrl) {
       console.error(
@@ -264,7 +301,15 @@ async function main() {
         console.error(okAdd ? `已加入书架:${resolved.join('、')}` : `订阅接口返回:${res.slice(0, 200)}`);
       }
 
-      const books = await readShelf(session, tab);
+      let books;
+      try {
+        books = await readShelf(session, tab);
+      } catch (e) {
+        if (!e.isShelfApiError) throw e;
+        console.error(explainShelfError(e));
+        process.exitCode = 1;
+        return;
+      }
       console.log(JSON.stringify(books, null, 2));
       console.error(
         `\n共 ${books.length} 个公众号。把想监控的 name/bookId 粘进 config.json 的 accounts 即可。`

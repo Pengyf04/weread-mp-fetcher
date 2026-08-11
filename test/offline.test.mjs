@@ -21,7 +21,7 @@ import { normalizeOut, writeText } from '../lib/save.mjs';
 import { fetchAll, diagnose2041, format2041Note } from '../lib/fetchflow.mjs';
 import { connectChrome, CONNECT_HELP } from '../lib/cdp.mjs';
 // 直接 import bin 是安全的:入口守卫保证被 import 时不跑 main()(下面「CLI 入口守卫」一节验的就是它)
-import { getReaderTab, commitRun } from '../bin/weread.mjs';
+import { getReaderTab, commitRun, readShelf } from '../bin/weread.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -214,9 +214,46 @@ ok('垃圾输入被拒');
 
 // ---------- 书架脚本 ----------
 console.log('书架脚本');
-assert.ok(LIST_SHELF_JS.includes('deepLink'), '必须从 deepLink 推导 readerUrl');
-assert.ok(LIST_SHELF_JS.includes('/web/mp/reader/'), 'readerUrl 前缀不能少');
-ok('书架脚本会推导出 readerUrl(用户不必手动复制)');
+
+// 与 runPageJs 同款:在 vm 里真跑 LIST_SHELF_JS,验行为不搜字符串
+// (「有没有查 errCode」这种事,注释里本来就有这些字,搜源码永远假通过)。
+async function runShelfJs(resp, { reject = false } = {}) {
+  let requested = null;
+  const s = await vm.runInNewContext(LIST_SHELF_JS, {
+    fetch: (u) => {
+      requested = u;
+      return reject ? Promise.reject(new Error('boom')) : Promise.resolve({ json: () => Promise.resolve(resp) });
+    },
+    Promise,
+    JSON,
+    String,
+  });
+  return { requested, out: JSON.parse(s) };
+}
+
+const sh1 = await runShelfJs({
+  books: [
+    { bookId: 'MP_WXS_1234567890', title: '甲号', deepLink: 'https://weread.qq.com/book-detail?type=1&v=abc123' },
+    { bookId: '999999', title: '一本普通的书', deepLink: 'https://weread.qq.com/book-detail?v=zzz' },
+    { bookId: 'MP_WXS_2', title: '乙号' }, // 没有 deepLink → readerUrl 应为 null,不许瞎拼
+  ],
+});
+assert.equal(sh1.requested, '/web/shelf/sync?synckey=0&teenmode=0&album=1', '请求的 URL 必须逐字如此');
+assert.equal(sh1.out.ok, true);
+assert.deepEqual(sh1.out.books, [
+  { name: '甲号', bookId: 'MP_WXS_1234567890', readerUrl: 'https://weread.qq.com/web/mp/reader/abc123' },
+  { name: '乙号', bookId: 'MP_WXS_2', readerUrl: null },
+]);
+ok('书架脚本:只留 MP_WXS_、deepLink→readerUrl 推导正确、无 deepLink 时 readerUrl=null');
+
+// ⚠️ NEW-1 的直接靶子:接口出错必须 {ok:false, errCode},不许再 (o.books||[]) 兜底成「空书架」。
+//    出错兜底成 [] 的后果是把登录态问题误诊成「你没订阅任何号」(2026-08-11 真实撞上过)。
+const sh2 = await runShelfJs({ errCode: -2041 });
+assert.deepEqual(sh2.out, { ok: false, errCode: -2041 }, '接口出错要原样带回错误码,不能装成空书架');
+const sh3 = await runShelfJs(null, { reject: true });
+assert.equal(sh3.out.ok, false);
+assert.ok(String(sh3.out.err).includes('boom'));
+ok('书架脚本与 buildPageJs 同口径:errCode / 页内异常都 resolve 成 {ok:false,…}');
 
 // ---------- 额度闸门 ----------
 console.log('额度闸门');
@@ -904,8 +941,12 @@ console.log('阅读器页与书架记账');
 /**
  * 假 CDP 会话:只认 lib/cdp.mjs 真正会发的那几个方法。
  * 用它跑的是**真实的** getReaderTab / listTabs / createTab / evaluate 代码路径,零网络。
+ *
+ * shelf       → 书架接口成功时返回的号列表(会包成 {ok:true, books} 的新契约)
+ * shelfResp   → 原样返回这个对象(用来模拟 {ok:false, errCode} 出错路径)
+ * shelfThrows → 书架那次 evaluate 直接抛错(模拟 CDP 层异常,不是接口出错)
  */
-function fakeCdpSession({ tabs = [], shelf = [] } = {}) {
+function fakeCdpSession({ tabs = [], shelf = [], shelfResp = null, shelfThrows = null } = {}) {
   const pages = tabs.map((t, i) => ({
     targetId: t.targetId || `T${i}`,
     type: 'page',
@@ -937,7 +978,8 @@ function fakeCdpSession({ tabs = [], shelf = [] } = {}) {
           const expr = params.expression;
           if (expr === LIST_SHELF_JS) {
             calls.shelfSync++; // ★ 这一次就是真实的 /web/shelf/sync
-            return { result: { value: JSON.stringify(shelf) } };
+            if (shelfThrows) throw new Error(shelfThrows);
+            return { result: { value: JSON.stringify(shelfResp ?? { ok: true, books: shelf }) } };
           }
           if (expr.includes('location.href')) {
             const t = pages.find((p) => p.targetId === attached.get(sessionId));
@@ -1018,6 +1060,119 @@ ok('getReaderTab 如实报出书架请求数:复用页=0、推导 readerUrl=1、
   assert.equal(quota.checkRequests(stReuse, 5, 1).ok, true, '同样两次运行,没问书架的那本账还剩 1 个额度');
   fs.rmSync(acctDir, { recursive: true, force: true });
   ok('书架请求如实进账本 requests.shelf,计入 used 并参与预算闸门判定');
+}
+
+// ---------- 书架接口出错 ≠ 空书架(NEW-1) ----------
+// 靶子:接口出错(如 -2041 会话未续期)时,绝不许再说「你的微信读书书架里还没有任何公众号」。
+// 「书架真的空」→ 建议 --add;「接口出错」→ 指引刷新/重新登录。两种结果必须可区分。
+console.log('书架接口出错 ≠ 空书架');
+
+const HOME_TAB = () => ({ targetId: 'HOME', title: '微信读书', url: 'https://weread.qq.com/' });
+
+{
+  // readShelf 的契约:成功返回数组(diagnose2041 的 Array.isArray 判据靠它);
+  // 接口出错抛带 isShelfApiError 标记的 Error(getReaderTab 靠它与 CDP 层异常区分)。
+  const S1 = fakeCdpSession({
+    tabs: [HOME_TAB()],
+    shelf: [{ name: '甲号', bookId: 'MP_WXS_1', readerUrl: READER_URL }],
+  });
+  const rows = await readShelf(S1.session, 'HOME');
+  assert.ok(Array.isArray(rows), '成功时必须还是数组,别把 diagnose2041 的「可用」判据弄坏');
+  assert.equal(rows[0].bookId, 'MP_WXS_1');
+
+  const S2 = fakeCdpSession({ tabs: [HOME_TAB()], shelfResp: { ok: false, errCode: -2041 } });
+  await assert.rejects(
+    () => readShelf(S2.session, 'HOME'),
+    (e) => {
+      assert.ok(e.message.includes('errCode=-2041'), '错误码要能从文本里认出来(与 fetchflow 同口径)');
+      assert.equal(e.isShelfApiError, true, '要带标记,好让调用方与 CDP 层异常区分');
+      return true;
+    }
+  );
+  ok('readShelf:成功返回数组;接口出错抛 isShelfApiError 的 Error(含 errCode=<n>)');
+}
+
+{
+  // getReaderTab 的三分岔:接口出错 / 登录失效 / 书架真的空,各给各的指引
+  const errs = [];
+  const origErr = console.error;
+  const origExit = process.exit;
+  console.error = (...a) => errs.push(a.join(' '));
+  process.exit = (code) => {
+    const e = new Error('exit:' + code);
+    e.exitCode = code;
+    throw e;
+  };
+  try {
+    // ① 接口出错(-2041)→ 不许误诊成「没订阅」,指引是刷新页面
+    const E1 = fakeCdpSession({ tabs: [HOME_TAB()], shelfResp: { ok: false, errCode: -2041 } });
+    await assert.rejects(() => getReaderTab(E1.session, {}), (e) => e.exitCode === 2);
+    let msg = errs.join('\n');
+    assert.ok(!msg.includes('还没有任何公众号'), '接口出错绝不许说「书架里还没有任何公众号」');
+    assert.ok(msg.includes('errCode=-2041'), '错误码要如实展示');
+    assert.ok(msg.includes('刷新'), '出错的指引是刷新页面');
+    errs.length = 0;
+
+    // ② 登录失效(-2010)→ 指引是重新扫码登录
+    const E2 = fakeCdpSession({ tabs: [HOME_TAB()], shelfResp: { ok: false, errCode: -2010 } });
+    await assert.rejects(() => getReaderTab(E2.session, {}), (e) => e.exitCode === 2);
+    msg = errs.join('\n');
+    assert.ok(!msg.includes('还没有任何公众号'));
+    assert.ok(msg.includes('errCode=-2010'));
+    assert.ok(msg.includes('扫码'), '登录失效的指引是重新扫码');
+    errs.length = 0;
+
+    // ③ 对照:书架真的是空的 → 原有指引照旧(建议 --add),别把老路修坏
+    const E3 = fakeCdpSession({ tabs: [HOME_TAB()], shelf: [] });
+    await assert.rejects(() => getReaderTab(E3.session, {}), (e) => e.exitCode === 2);
+    msg = errs.join('\n');
+    assert.ok(msg.includes('还没有任何公众号'), '真空书架的文案不该变');
+    assert.ok(msg.includes('--add'), '真空书架仍建议 --add');
+    errs.length = 0;
+
+    // ④ CDP 层异常(evaluate 自己抛)→ 原样上抛,不许被冒充成书架接口出错
+    const E4 = fakeCdpSession({ tabs: [HOME_TAB()], shelfThrows: 'target closed' });
+    await assert.rejects(
+      () => getReaderTab(E4.session, {}),
+      (e) => {
+        assert.ok(String(e.message).includes('target closed'), '错误原文要保留');
+        assert.notEqual(e.exitCode, 2, '不该走 process.exit(2) 那条书架分支');
+        return true;
+      }
+    );
+    assert.ok(!errs.join('\n').includes('书架接口出错'), 'CDP 层的错不许套书架接口出错的文案');
+  } finally {
+    console.error = origErr;
+    process.exit = origExit;
+  }
+  ok('getReaderTab 三分岔:接口出错→刷新指引、-2010→扫码指引、真空书架→--add;CDP 异常原样上抛');
+}
+
+{
+  // 附带修正:全失败探测(U4.6)的书架信号。以前接口出错时页内兜底成 [],
+  // Array.isArray([]) → 误报「可用」;现在 readShelf 抛错 → 如实「不可用」。
+  const G = fakeCdpSession({ tabs: [HOME_TAB()], shelfResp: { ok: false, errCode: -2041 } });
+  const d = await diagnose2041(
+    mkResult([{ name: '甲', bookId: 'B1', err: 'errCode=-2041' }]),
+    {
+      reloadTab: async () => {},
+      probeUntilReady: async () => ({ verdict: 'ready' }),
+      readShelf: () => readShelf(G.session, 'HOME'),
+    }
+  );
+  assert.equal(d.shelfSignal, '不可用', '书架接口出错时不许再误报「可用(登录态还在)」');
+
+  const G2 = fakeCdpSession({ tabs: [HOME_TAB()], shelf: [{ name: '甲号' }] });
+  const d2 = await diagnose2041(
+    mkResult([{ name: '甲', bookId: 'B1', err: 'errCode=-2041' }]),
+    {
+      reloadTab: async () => {},
+      probeUntilReady: async () => ({ verdict: 'ready' }),
+      readShelf: () => readShelf(G2.session, 'HOME'),
+    }
+  );
+  assert.equal(d2.shelfSignal, '可用', '真能读到书架时仍是「可用」');
+  ok('U4.6 书架信号接真实 readShelf:接口出错→不可用,读得到→可用(不再被空数组骗过)');
 }
 
 // ---------- 翻页回归基线 ----------
