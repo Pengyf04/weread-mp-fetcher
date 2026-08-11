@@ -1,0 +1,65 @@
+{
+  "onReader": true,
+  "sources": [
+    {
+      "name": "甲号",
+      "bookId": "MP_WXS_0000000001",
+      "items": [
+        {
+          "t": 1785636055,
+          "title": "第一篇 | 标题里带竖线",
+          "url": "https://mp.weixin.qq.com/s/AAA1",
+          "rid": "MP_WXS_0000000001_a1"
+        },
+        {
+          "t": 1785636055,
+          "title": "第二篇(同一次群发)",
+          "url": "https://mp.weixin.qq.com/s/AAA2",
+          "rid": "MP_WXS_0000000001_a2"
+        },
+        {
+          "t": 1785549655,
+          "title": "第三篇",
+          "url": "https://mp.weixin.qq.com/s/BBB1",
+          "rid": "MP_WXS_0000000001_b1"
+        },
+        {
+          "t": 1785549655,
+          "title": "第四篇(没有 reviewId)",
+          "url": "https://mp.weixin.qq.com/s/BBB2",
+          "rid": ""
+        }
+      ]
+    },
+    {
+      "name": "乙号",
+      "bookId": "MP_WXS_0000000002",
+      "items": [
+        {
+          "t": 1785636055,
+          "title": "第一篇 | 标题里带竖线",
+          "url": "https://mp.weixin.qq.com/s/AAA1",
+          "rid": "MP_WXS_0000000001_a1"
+        },
+        {
+          "t": 1785636055,
+          "title": "第二篇(同一次群发)",
+          "url": "https://mp.weixin.qq.com/s/AAA2",
+          "rid": "MP_WXS_0000000001_a2"
+        },
+        {
+          "t": 1785549655,
+          "title": "第三篇",
+          "url": "https://mp.weixin.qq.com/s/BBB1",
+          "rid": "MP_WXS_0000000001_b1"
+        },
+        {
+          "t": 1785549655,
+          "title": "第四篇(没有 reviewId)",
+          "url": "https://mp.weixin.qq.com/s/BBB2",
+          "rid": ""
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,50 @@
+{
+  "_说明": "翻页回归用的假接口响应(第 0 页)。golden fixture 与 P3 的新链路回归共用这一份数据,保证'同一组假数据'。",
+  "reviews": [
+    {
+      "createTime": 1785636055,
+      "subReviews": [
+        {
+          "review": {
+            "createTime": 1785636055,
+            "reviewId": "MP_WXS_0000000001_a1",
+            "mpInfo": { "title": "第一篇 | 标题里带竖线", "originalId": "AAA1" }
+          }
+        },
+        {
+          "review": {
+            "createTime": 1785636055,
+            "reviewId": "MP_WXS_0000000001_a2",
+            "mpInfo": { "title": "第二篇(同一次群发)", "originalId": "AAA2" }
+          }
+        }
+      ]
+    },
+    {
+      "createTime": 1785549655,
+      "subReviews": [
+        {
+          "review": {
+            "createTime": 1785549655,
+            "reviewId": "MP_WXS_0000000001_b1",
+            "mpInfo": { "title": "第三篇", "originalId": "BBB1" }
+          }
+        },
+        {
+          "review": {
+            "createTime": 1785549655,
+            "reviewId": "",
+            "mpInfo": { "title": "第四篇(没有 reviewId)", "originalId": "BBB2" }
+          }
+        },
+        {
+          "review": {
+            "createTime": 1785549655,
+            "reviewId": "MP_WXS_0000000001_b5",
+            "mpInfo": { "originalId": "BBB5" }
+          }
+        }
+      ]
+    }
+  ]
+}

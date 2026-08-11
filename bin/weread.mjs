@@ -18,18 +18,15 @@ import { connectChrome, listTabs, createTab, evaluate } from '../lib/cdp.mjs';
 import { PROBE_JS, buildFetchJs, LIST_SHELF_JS, buildAddToShelfJs } from '../lib/scripts.mjs';
 import { resolveBookId } from '../lib/mp.mjs';
 import * as quota from '../lib/quota.mjs';
+import { has, val } from '../lib/args.mjs';
+import { toMarkdown } from '../lib/render.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 const argv = process.argv.slice(2);
-const has = (f) => argv.includes(f);
-const val = (f, d) => {
-  const i = argv.indexOf(f);
-  return i >= 0 && argv[i + 1] ? argv[i + 1] : d;
-};
 
 function loadConfig() {
-  const file = path.resolve(val('--config', path.join(ROOT, 'config.json')));
+  const file = path.resolve(val(argv, '--config', path.join(ROOT, 'config.json')));
   if (!fs.existsSync(file)) {
     console.error(
       `找不到配置文件:${file}\n\n` +
@@ -129,39 +126,10 @@ function explain(state) {
   }
 }
 
-// 用本机时区格式化。不能用 toISOString() —— 那是 UTC,
-// 东八区会把下午 5 点的文章显示成上午 9 点,看着像凌晨发的。
-function fmtTime(unixSec) {
-  const d = new Date(unixSec * 1000);
-  const p = (n) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
-}
-
-function toMarkdown(sources) {
-  const lines = [];
-  for (const s of sources) {
-    lines.push(`\n### ${s.name}`);
-    if (s.err) {
-      lines.push(`\n> 抓取失败:${s.err}\n`);
-      continue;
-    }
-    if (!s.items.length) {
-      lines.push('\n> 没有取到文章\n');
-      continue;
-    }
-    lines.push('\n| 时间 | 标题 | 链接 |', '|---|---|---|');
-    for (const it of s.items) {
-      const t = fmtTime(it.t);
-      lines.push(`| ${t} | ${it.title.replace(/\|/g, '\\|')} | [原文](${it.url}) |`);
-    }
-  }
-  return lines.join('\n');
-}
-
 async function main() {
   const cfg = loadConfig();
 
-  if (has('--quota')) {
+  if (has(argv, '--quota')) {
     const s = quota.status(cfg.statePath, cfg.maxRunsPerDay);
     console.log(`今日(${s.date})已抓 ${s.count}${s.max ? '/' + s.max : ''} 次`);
     return;
@@ -170,10 +138,10 @@ async function main() {
   const session = await connectChrome({ port: cfg.chromePort, profileDir: cfg.chromeProfileDir });
   try {
     // --shelf / --add 只用书架接口,在微信读书首页就能调,不需要阅读器页
-    if (has('--shelf') || has('--add')) {
+    if (has(argv, '--shelf') || has(argv, '--add')) {
       const tab = await getAnyWereadTab(session);
 
-      if (has('--add')) {
+      if (has(argv, '--add')) {
         const inputs = argv.slice(argv.indexOf('--add') + 1).filter((a) => !a.startsWith('--'));
         if (!inputs.length) {
           console.error('用法:--add <公众号任意一篇文章的链接 或 MP_WXS_xxx> [更多...]');
@@ -212,7 +180,7 @@ async function main() {
 
     // 先探针,再决定要不要发业务请求。探针不消耗额度,所以放在闸门前面。
     const state = await probeUntilReady(session, targetId);
-    if (has('--probe')) {
+    if (has(argv, '--probe')) {
       console.log(JSON.stringify(state, null, 2));
       if (state.verdict !== 'ready') console.error('\n' + explain(state));
       return;
@@ -253,7 +221,7 @@ async function main() {
     }
 
     quota.commit(cfg.statePath);
-    console.log(has('--format') && val('--format') === 'md' ? toMarkdown(result.sources) : JSON.stringify(result, null, 2));
+    console.log(has(argv, '--format') && val(argv, '--format') === 'md' ? toMarkdown(result.sources) : JSON.stringify(result, null, 2));
     if (failed.length) {
       console.error(`\n注意:${failed.length} 个公众号抓取失败(${failed.map((f) => f.name).join('、')})`);
     }
@@ -262,10 +230,27 @@ async function main() {
   }
 }
 
-main().then(
-  () => process.exit(process.exitCode || 0),
-  (e) => {
-    console.error('出错了:', e.message);
-    process.exit(1);
-  }
-);
+export { main };
+
+// ★ 入口守卫:必须用 realpath 两侧比较,不能用 pathToFileURL(process.argv[1]) 对比 import.meta.url。
+//   package.json 声明了 "bin",`npm i -g` / `npm link` 会在 PATH 里放一个**符号链接**;
+//   而 ESM 主模块的 import.meta.url 已经过 realpath 解析,process.argv[1] 却原样保留链接路径
+//   —— 用 URL 比较,全局安装的用户跑本命令会**静默什么都不做、还退出码 0**。
+let isMain = false;
+try {
+  isMain =
+    !!process.argv[1] &&
+    fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url));
+} catch {
+  /* argv[1] 不存在/不可读(如 node --eval) → 视为非入口,不执行 main() */
+}
+
+if (isMain) {
+  main().then(
+    () => process.exit(process.exitCode || 0),
+    (e) => {
+      console.error('出错了:', e.message);
+      process.exit(1);
+    }
+  );
+}
