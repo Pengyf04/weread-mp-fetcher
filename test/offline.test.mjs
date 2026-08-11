@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import vm from 'node:vm';
 import { PROBE_JS, buildPageJs, LIST_SHELF_JS, buildAddToShelfJs } from '../lib/scripts.mjs';
 import { extractBiz, bizToBookId, resolveBookId } from '../lib/mp.mjs';
@@ -440,10 +440,15 @@ function runCapture(args) {
 }
 
 // 负向:import 不许有任何副作用
+// ⚠️ import 说明符必须用 file:// URL,不能用裸绝对路径 —— Windows 上 `D:\...` 不是
+//    合法 ESM 说明符,Node 会抛 ERR_UNSUPPORTED_ESM_URL_SCHEME(CI Windows 腿实测撞上)。
 const probeImport = path.join(guardDir, 'probe-import.mjs');
-fs.writeFileSync(probeImport, `await import(${JSON.stringify(path.join(ROOT, 'bin/weread.mjs'))});\n`);
+fs.writeFileSync(
+  probeImport,
+  `await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'bin/weread.mjs')).href)});\n`
+);
 const imported = runCapture([probeImport, '--config', guardCfg]);
-assert.equal(imported.code, 0, 'import 不应退出非 0');
+assert.equal(imported.code, 0, `import 不应退出非 0,stderr:${imported.stderr.slice(0, 400)}`);
 assert.equal(imported.stdout, '', `import 时 stdout 必须为空,实际:${imported.stdout}`);
 assert.equal(imported.stderr, '', `import 时 stderr 必须为空,实际:${imported.stderr}`);
 ok(`被 import 时不执行 main()(stdout/stderr 均空,端口 ${deadPort} 实测无人监听)`);
@@ -451,19 +456,31 @@ ok(`被 import 时不执行 main()(stdout/stderr 均空,端口 ${deadPort} 实�
 // 正向:CLI 入口没有被守卫关死。--quota 在 connectChrome 之前,零网络零额度。
 const quotaLine = /^今日\(\d{4}-\d{2}-\d{2}\)已抓 0\/2 次;请求 0\/40\(文章 0,书架 0\)\n$/;
 const direct = runCapture([path.join(ROOT, 'bin/weread.mjs'), '--config', guardCfg, '--quota']);
-assert.equal(direct.code, 0);
+assert.equal(direct.code, 0, `直接调用应退出 0,stderr:${direct.stderr.slice(0, 400)}`);
 assert.match(direct.stdout, quotaLine, `stdout 必须恰好是那一行,实际:${JSON.stringify(direct.stdout)}`);
 assert.equal(fs.existsSync(guardState), false, '--quota 只读,不该建账本文件');
 ok('直接调用 → stdout 恰好一行、退出 0、不创建账本');
 
-// 符号链接回归:npm i -g / npm link 就是这么调的
-const linkPath = path.join(guardDir, 'weread-link');
-fs.symlinkSync(path.join(ROOT, 'bin/weread.mjs'), linkPath);
-const viaLink = runCapture([linkPath, '--config', guardCfg, '--quota']);
-assert.equal(viaLink.code, 0);
-assert.match(viaLink.stdout, quotaLine, `经符号链接调用时 stdout 必须相同,实际:${JSON.stringify(viaLink.stdout)}`);
-assert.equal(fs.existsSync(guardState), false);
-ok('经符号链接调用 → 与直接调用完全相同(旧的 pathToFileURL 写法在这里会静默什么都不做)');
+// 符号链接回归:npm i -g / npm link 在 POSIX 上就是这么调的。
+// Windows 上 npm 用的是 .cmd shim 而非符号链接,且创建符号链接可能需要特权 ——
+// EPERM 时跳过(平台限制,不是产品 bug),其他错误照常抛。
+let linkPath = null;
+try {
+  linkPath = path.join(guardDir, 'weread-link');
+  fs.symlinkSync(path.join(ROOT, 'bin/weread.mjs'), linkPath);
+} catch (e) {
+  if (e.code === 'EPERM' && process.platform === 'win32') linkPath = null;
+  else throw e;
+}
+if (linkPath) {
+  const viaLink = runCapture([linkPath, '--config', guardCfg, '--quota']);
+  assert.equal(viaLink.code, 0, `经符号链接调用应退出 0,stderr:${viaLink.stderr.slice(0, 400)}`);
+  assert.match(viaLink.stdout, quotaLine, `经符号链接调用时 stdout 必须相同,实际:${JSON.stringify(viaLink.stdout)}`);
+  assert.equal(fs.existsSync(guardState), false);
+  ok('经符号链接调用 → 与直接调用完全相同(旧的 pathToFileURL 写法在这里会静默什么都不做)');
+} else {
+  ok('符号链接回归在本平台跳过(无创建权限,且 Windows 的 npm 走 .cmd shim 不走符号链接)');
+}
 
 fs.rmSync(guardDir, { recursive: true, force: true });
 
