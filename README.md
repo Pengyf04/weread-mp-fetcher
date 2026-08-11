@@ -131,7 +131,7 @@ google-chrome \
 对应的 `config.json`：
 
 ```json
-{ "chromePort": 9333 }
+{ "chromePort": 9333, "chromeProfileDir": "~/.weread-mp-fetcher/chrome-profile" }
 ```
 
 几件要知道的事：

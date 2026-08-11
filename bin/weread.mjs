@@ -38,6 +38,7 @@ function loadConfig() {
   }
   const cfg = JSON.parse(fs.readFileSync(file, 'utf8'));
   cfg.statePath = (cfg.statePath || '~/.weread-mp-fetcher/quota.json').replace(/^~/, os.homedir());
+  if (cfg.chromeProfileDir) cfg.chromeProfileDir = cfg.chromeProfileDir.replace(/^~/, os.homedir());
   cfg.maxRunsPerDay = cfg.maxRunsPerDay ?? 2;
   cfg.requestIntervalMs = cfg.requestIntervalMs ?? 3000;
   cfg.accounts = cfg.accounts || [];

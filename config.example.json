@@ -19,6 +19,9 @@
   "_chromePort": "方案A(推荐,专用 profile): 填 9333。方案B(auto-connect,用日常 Chrome): 留 null,让工具从默认 profile 目录的 DevToolsActivePort 里读。不用 9222:它是各类调试工具的事实默认端口,极易被占,而且端口冲突不报错(静默退到 IPv6),排查起来很费时间。",
   "chromePort": 9333,
 
+  "_chromeProfileDir": "只影响去哪个目录找 DevToolsActivePort。方案A: 填 ~/.weread-mp-fetcher/chrome-profile(就是启动 Chrome 时 --user-data-dir 指的那个)。方案B: 留 null,扫平台默认 profile 目录。支持 ~ 开头。",
+  "chromeProfileDir": "~/.weread-mp-fetcher/chrome-profile",
+
   "_statePath": "每日次数记录存放位置,不进仓库。",
   "statePath": "~/.weread-mp-fetcher/quota.json"
 }
