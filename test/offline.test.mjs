@@ -18,7 +18,7 @@ import * as quota from '../lib/quota.mjs';
 import { has, val, valOpt } from '../lib/args.mjs';
 import { fmtTime, fmtStamp, toMarkdown } from '../lib/render.mjs';
 import { normalizeOut, writeText } from '../lib/save.mjs';
-import { fetchAll } from '../lib/fetchflow.mjs';
+import { fetchAll, diagnose2041, format2041Note } from '../lib/fetchflow.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -618,6 +618,111 @@ const allFailed = (r) => r.sources.filter((s) => s.err).length === r.sources.len
   const md2 = toMarkdown([{ name: '甲号', bookId: 'B1', items: [art(1785636055, 'AAA')], pagesFetched: 1, partialErr: 'evaluate 失败:target closed' }]);
   assert.ok(md2.includes('第 2 页起未取到:evaluate 失败'));
   ok('部分失败的号:表格照出,警告附在表格之后');
+}
+
+// ---------- -2041 出错路径 ----------
+// 全离线:reloadTab / probeUntilReady / readShelf 全是假的,零网络零额度。
+console.log('-2041 出错路径');
+
+function mkDeps({ reloadThrows = false, shelf = [{ name: 'x' }] } = {}) {
+  const n = { reload: 0, probe: 0, shelf: 0 };
+  return {
+    n,
+    deps: {
+      reloadTab: async () => {
+        n.reload++;
+        if (reloadThrows) throw new Error('Page.reload 不支持');
+      },
+      probeUntilReady: async () => {
+        n.probe++;
+        return { verdict: 'ready' };
+      },
+      readShelf: async () => {
+        n.shelf++;
+        return shelf;
+      },
+    },
+  };
+}
+const mkResult = (sources) => ({ onReader: true, meta: { pages: 1, requestsTotal: sources.length }, sources });
+
+{
+  // 1. 有 -2041 → 刷新恰好 1 次
+  const { n, deps } = mkDeps();
+  const r = mkResult([
+    { name: '甲', bookId: 'B1', err: 'errCode=-2041' },
+    { name: '乙', bookId: 'B2', items: [], pageMeta: [], pagesFetched: 1 },
+  ]);
+  const failedBefore = r.sources.filter((s) => s.err).length;
+  const d = await diagnose2041(r, deps);
+  assert.equal(n.reload, 1);
+  assert.equal(d.probeVerdict, 'ready');
+  // 5. 额度红线:走了这条分支之后,failed 的计算结果必须完全不变
+  assert.equal(r.sources.filter((s) => s.err).length, failedBefore);
+  ok('有 -2041 → 刷新恰好 1 次,且 failed 的计算结果不受影响');
+
+  // 3. 部分失败 → 刷新 1 次,但**不问书架**
+  assert.equal(n.shelf, 0, '还有号成功,账号显然没事,不该再花一个书架请求');
+  ok('部分失败时不查书架(U4.6:只在全失败时探)');
+}
+
+{
+  // 2. 只有 -2010 → 一次都不刷新
+  const { n, deps } = mkDeps();
+  const d = await diagnose2041(mkResult([{ name: '甲', bookId: 'B1', err: 'errCode=-2010' }]), deps);
+  assert.equal(d, null);
+  assert.equal(n.reload, 0);
+  assert.equal(n.shelf, 0);
+  ok('只有 -2010(登录失效)→ 不刷新、不查书架');
+}
+
+{
+  // 3'. partialErr 里的 -2041 也要认出来
+  const { n, deps } = mkDeps();
+  await diagnose2041(
+    mkResult([{ name: '甲', bookId: 'B1', items: [], pageMeta: [], pagesFetched: 2, partialErr: 'errCode=-2041' }]),
+    deps
+  );
+  assert.equal(n.reload, 1);
+  assert.equal(n.shelf, 0, 'partialErr 意味着有数据,不算全失败');
+  ok('partialErr 里的 -2041 同样触发刷新,但不查书架');
+}
+
+{
+  // 4. 全部 -2041 → 刷新 1 次 + 书架 1 次
+  const { n, deps } = mkDeps();
+  const d = await diagnose2041(
+    mkResult([
+      { name: '甲', bookId: 'B1', err: 'errCode=-2041' },
+      { name: '乙', bookId: 'B2', err: 'errCode=-2041' },
+    ]),
+    deps
+  );
+  assert.equal(n.reload, 1);
+  assert.equal(n.shelf, 1);
+  assert.equal(d.shelfSignal, '可用');
+  ok('全部号 -2041 → 刷新 1 次 + 书架信号 1 次(可用 = 登录态还在)');
+}
+
+{
+  // 6. reloadTab 抛错 → 流程不中断,照常陈述,书架逻辑照走
+  const { n, deps } = mkDeps({ reloadThrows: true });
+  const d = await diagnose2041(mkResult([{ name: '甲', bookId: 'B1', err: 'errCode=-2041' }]), deps);
+  assert.ok(d.reloadNote.startsWith('刷新失败:'));
+  assert.equal(n.probe, 1, '刷新失败也要重探');
+  assert.equal(n.shelf, 1);
+  ok('reloadTab 抛错不中断流程,如实写成「刷新失败:…」');
+}
+
+{
+  // 措辞是设计的一部分:只陈述观察,不下结论
+  const note = format2041Note({ reloadNote: '已刷新', probeVerdict: 'captcha', shelfSignal: '可用' });
+  for (const banned of ['原因是', '因为', '说明被限流']) {
+    assert.ok(!note.includes(banned), `陈述式文案里不许出现「${banned}」`);
+  }
+  assert.ok(note.includes('观察到'));
+  assert.ok(note.includes('不对 -2041 的原因下结论'));
+  ok('文案只陈述观察,不断定因果(无「原因是/因为/说明被限流」)');
 }
 
 // ---------- 翻页回归基线 ----------
