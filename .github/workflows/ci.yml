@@ -4,8 +4,8 @@
 # - 零第三方依赖 → 不需要 npm install,没有缓存步骤
 # - 测试完全离线 → 不连 Chrome、不碰微信读书,CI 里永远不会发任何真实请求
 # - Node 矩阵 18/20/22 → 验证 package.json 里 engines >= 18 的承诺不是空话
-# - Windows 是观察腿(continue-on-error):本项目从未在 Windows 实测过,
-#   先用 CI 收集事实,红了不阻塞主状态;确认稳定后再转为必过项
+# - Windows 必过:最初是观察腿(从未在 Windows 实测过),首轮 CI 抓到并修掉
+#   测试脚手架的 ESM import 路径问题后已稳定全绿,自 v0.2.0 后转为必过项
 #
 # 安全:本 workflow 的 run 步骤不使用任何来自事件的不可信输入(标题/正文/分支名等),
 # 矩阵值均为本文件内的静态字面量;权限收敛为只读。
@@ -28,20 +28,17 @@ jobs:
     name: Node ${{ matrix.node }} · ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
-    continue-on-error: ${{ matrix.experimental == true }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
         node: ['18', '20', '22']
-        experimental: [false]
         include:
           - os: windows-latest
             node: '22'
-            experimental: true
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: ${{ matrix.node }}
       - name: 语法检查(所有源码文件)

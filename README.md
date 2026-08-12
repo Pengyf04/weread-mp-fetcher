@@ -236,7 +236,7 @@ node bin/weread.mjs --out ~/Desktop                # 给的是已存在的目录
 | `node bin/weread.mjs --format md` | 抓取，输出 Markdown 表格 |
 | `--out [路径]` | **把结果写进文件**而不是打到屏幕上。路径可省略，省略就写 `out/weread-<年月日-时分>.<md\|json>` |
 | `--pages N` | 每个号往回多翻几页，用来看**更旧**的文章。默认 1，上限 `maxPagesPerRun`（默认 3） |
-| `node bin/weread.mjs --probe` | **只看页面状态，不抓取**。免费，不消耗每日次数 |
+| `node bin/weread.mjs --probe` | **只看页面状态，不抓取**。不消耗每日次数（无现成阅读器标签页时可能发 1 个书架请求，见「限频」节） |
 | `node bin/weread.mjs --shelf` | 列出你已订阅的公众号、`bookId` 和阅读器页 URL |
 | `node bin/weread.mjs --add <链接\|bookId>...` | 订阅公众号。给文章链接会自动算出 `bookId` |
 | `node bin/weread.mjs --quota` | 看今天已经抓了几次、发了多少个请求 |
