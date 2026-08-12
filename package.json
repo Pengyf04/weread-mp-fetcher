@@ -1,6 +1,6 @@
 {
   "name": "weread-mp-fetcher",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "通过微信读书抓取公众号最新文章,零依赖,复用你已登录的 Chrome",
   "type": "module",
   "bin": { "weread-mp-fetcher": "bin/weread.mjs" },
