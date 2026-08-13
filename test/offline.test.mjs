@@ -184,6 +184,32 @@ assert.equal(p1.out.items[0].url, 'https://mp.weixin.qq.com/s/AAA');
 assert.equal(p1.out.onReader, true);
 ok('一次群发含多篇时全部展开,原文链接拼接正确');
 
+// 微信读书的 rid 用 _ 做分隔符(MP_WXS_<数字>_<id>),所以它把 originalId 里的
+// base64url 下划线编码成了 ~。拼原文链接时必须还原,否则微信侧报「参数错误」打不开。
+// (实测:…/s/YZpEE~fPFvPpq~JBS5Lnfw → 参数错误;还原成 _ 后正常打开。)
+const tildeGroups = {
+  reviews: [
+    {
+      createTime: 200,
+      subReviews: [
+        { review: { createTime: 200, reviewId: 'MP_WXS_3236757533_ypkXO~mvGQjfqBFR0y~QGg', mpInfo: { title: '含下划线的文章', originalId: 'ypkXO~mvGQjfqBFR0y~QGg' } } },
+      ],
+    },
+  ],
+};
+const pTilde = await runPageJs('MP_WXS_3236757533', 0, tildeGroups);
+assert.equal(
+  pTilde.out.items[0].url,
+  'https://mp.weixin.qq.com/s/ypkXO_mvGQjfqBFR0y_QGg',
+  '原文链接里的 ~ 必须还原成 _,否则打不开'
+);
+assert.equal(
+  pTilde.out.items[0].rid,
+  'MP_WXS_3236757533_ypkXO~mvGQjfqBFR0y~QGg',
+  'rid 是微信读书自己的标识,保持原样(去重要用它对回接口数据)'
+);
+ok('originalId 里被编码成 ~ 的下划线,拼 URL 时还原为 _(rid 不动)');
+
 const p2 = await runPageJs('B', 0, { errCode: -2041 });
 assert.deepEqual(p2.out, { ok: false, errCode: -2041 }, '错误码要原样带回来给 Node 侧');
 const p3 = await runPageJs('B', 0, null, { reject: true });
