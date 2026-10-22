@@ -17,7 +17,7 @@ node bin/weread.mjs --format md
 | 2026-08-03 18:01 | 另一篇文章的标题 | [原文](https://mp.weixin.qq.com/s/yyyyy) |
 ```
 
-拿到的是 `mp.weixin.qq.com` **原文直链**，可以直接打开、可以喂给别的工具。
+取得的链接指向 `mp.weixin.qq.com` 原文；无法可靠生成地址的文章明确显示 **“原文链接未取得”**，不会猜一个看似有效的链接。工具不自动打开微信公开页核验，不保证每条链接始终可读。
 
 ---
 
@@ -28,6 +28,7 @@ node bin/weread.mjs --format md
 ### 它能做什么
 
 - 把你在微信读书里**已订阅公众号**的最新文章列出来（标题、发布时间、`mp.weixin.qq.com` 原文直链）
+- 对本轮缺少链接、且有合法 `reviewId` 的文章自动逐篇转链，包括新式 `WR…` 长标识；已有合法短链接不增加请求
 - 输出 JSON 或 Markdown，可以直接喂给别的工具
 - 帮你把新公众号加进来：给一篇它的文章链接就行
 
@@ -250,12 +251,32 @@ node bin/weread.mjs --format md --pages 3      # 每个号翻 3 页
 
 - **单位是「页/请求」，不是「文章数」。** 1 页 ≈ 20 次群发 ≈ 70–80 篇（因号而异）。
   之所以不做 `--limit 50 篇` 或 `--since 某天`：那两种写法的请求成本**没法预判**，
-  而本工具最该让你看清楚的就是"这一条命令要打几个请求"。请求数 = 公众号个数 × N，跑之前会打印出来。
+  列表请求数 = 公众号个数 × N，跑之前会打印出来。取得列表后若有缺链条目，还会增加逐篇转链请求，数量取决于本轮实际缺链情况，见下节。
 - **先纠正一个常见误解**：默认拿到的不是"20 篇文章"，是"20 条群发"——一条群发里可以有好几篇，
   所以你现在拿到的其实已经是 70–80 篇了。
 - 有页失败时，**已经抓到的页照常输出**，md 里会在该号表格后面附一行警告，JSON 里是 `partialErr`。
 
 ---
+
+## WR 长标识与自动转链
+
+旧式 `originalId` 是已知格式的22字符短 token，可将 `~` 还原成 `_` 后直接拼 `/s/<token>`。
+新式 `WR…` 是微信读书内部的不透明标识，不能直接拼成 `/s/WR…`，也不是已知可逆编码。
+
+工具默认对**本轮所有缺链条目**尝试补链，不按日期筛选、不保存 cutoff：
+
+1. 在你已登录的阅读器页，以完整 `reviewId` 请求一次 `/web/mp/content`。
+2. 只读取 HTML 的 `og:url` 和 `og:title`，核对标题、微信域名及 `/s` 路径，确认 `__biz` 解码后的公众号与 `reviewId`、本轮公众号一致。
+3. 用 `__biz`、`mid`、`idx`、`sn` 四个稳定字段重建地址，不输出临时票据、`chksm`、`poc_token`。
+
+这不是正文下载：不保存正文，不执行返回 HTML 里的脚本，也不加载它的图片等资源；同源请求依旧使用 Chrome 的登录态，不导出 Cookie。
+生成的 `metadata_url` 可直接用于报告，**不自动打开微信公开页逐篇核验**。
+
+- **每个合法且唯一的缺链 rid 增加1次请求**，同 rid 本轮最多一次，重跑可能重新请求。已有短链接零额外请求。
+- 单篇转链串行执行，相邻请求（包括最后一次列表到第一次转链）至少间隔3秒；配置更长间隔时沿用更长值。70个缺链项仅等待就约210秒，另加网络耗时。
+- 任何服务端拒绝、验证码、超时或元数据不符，都停止整个转链批次，不自动重试；已取得的链接及原列表保留。缺少合法 rid、未请求或失败的条目显示“原文链接未取得”，JSON 附状态和原因。
+- **单篇转链不占 `maxRequestsPerDay` 的40次列表/书架预算**，但会独立记录尝试次数，失败和超时同样计尝试；不额外扣一次运行次数。预算豁免不是风控豁免，请控制关注号数和翻页规模。
+- 账本无法写入时不会继续发送单篇请求。已抓列表仍尝试导出，但命令以非0状态退出，并明确提示该轮次数/列表请求未结算，需要先修复账本。
 
 ## ⚠️ 关于限频：请务必看一眼
 
@@ -265,14 +286,14 @@ node bin/weread.mjs --format md --pages 3      # 每个号翻 3 页
 
 ```json
 "maxRunsPerDay": 2,        // 一天最多跑几次(一次不算全败的运行 = 1 次)
-"maxRequestsPerDay": 40,   // 一天最多发多少个真实请求(文章 + 书架)
+"maxRequestsPerDay": 40,   // 列表 + 书架预算，不含单篇转链尝试
 "maxPagesPerRun": 3,       // --pages 的上限,超过直接拒绝
 "requestIntervalMs": 3000  // 每两个请求之间的间隔(跨页也跨号)
 ```
 
 - 三道都是**拒绝执行**，不是警告
-- **请求数怎么算**：公众号个数 × `--pages`。4 个号 `--pages 3` = 12 个请求，
-  `maxRunsPerDay: 2` 下一天最多 24 个
+- **预算内列表请求数怎么算**：公众号个数 × `--pages`。4 个号 `--pages 3` = 12 个列表请求，
+  `maxRunsPerDay: 2` 下一天最多24个列表请求；另加可能的书架请求及不占预算的逐篇转链请求，这不是全天总网络请求上限
 - **再加 1 个的情况**：没有可复用的阅读器标签页、`config.json` 里又没写 `readerUrl` 时，
   工具要问一次书架接口才能推导出阅读器页 URL。这 1 个请求会如实记进账本的"书架"一栏，
   也占 `maxRequestsPerDay` 的预算（运行前那句"预计 N 个请求"只按 号数 × pages 预估，不含它）。
@@ -282,7 +303,7 @@ node bin/weread.mjs --format md --pages 3      # 每个号翻 3 页
 - `--probe` 不算次数、不发文章请求；但它同样要先找到阅读器页，所以上面那 1 个书架请求
   在探针路径上也可能发生（探针路径整体不计账）
 - 抓取失败不计数，但**也别立刻重试**，隔几小时再说
-- `--quota` 会告诉你今天已经花了多少：`今日(…)已抓 1/2 次;请求 12/40(文章 12,书架 0)`
+- `--quota` 会分别报告预算内请求和额外转链尝试：`今日(…)已抓 1/2 次;预算请求 12/40(列表 12,书架 0);转链尝试 6(不占预算)`。转链尝试在发送前独立落账，CDP 异常时可能尚未发出 HTTP，所以该数是保守尝试数，不是网络层确认数
 
 > ⚠️ **`maxRequestsPerDay: 40` 是个默认预算，不是"安全线"。** 唯一的参照点是作者那次
 > 「一天 30 多个请求触发反爬」的一手观察——那是一次观察，**真实阈值未知也测不出来**，
@@ -368,7 +389,10 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:9333/json/version
 ```json
 {
   "onReader": true,
-  "meta": { "pages": 3, "requestsTotal": 3 },
+  "meta": {
+    "pages": 3, "requestsTotal": 3,
+    "links": { "candidates": 0, "requestsTotal": 0, "resolved": 0, "unresolved": 0, "aborted": null }
+  },
   "sources": [
     {
       "name": "某某公众号",
@@ -377,8 +401,9 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:9333/json/version
         {
           "t": 1785636055,
           "title": "文章标题",
-          "url": "https://mp.weixin.qq.com/s/xxxxx",
-          "rid": "MP_WXS_xxx_yyy"
+          "url": "https://mp.weixin.qq.com/s/AAAAAAAAAAAAAAAAAAAAAA",
+          "rid": "MP_WXS_0000000000_AAAAAAAAAAAAAAAAAAAAAA",
+          "linkStatus": "short_token"
         }
       ],
       "pageMeta": [{ "offset": 0, "reviews": 20, "items": 74, "oldest": 1784000000 }],
@@ -391,7 +416,8 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:9333/json/version
 - `t` 是 Unix 秒。做增量的话，记住每个号上次的最大 `t`，下次只取更大的
 - ⚠️ 同一次群发的多篇文章 `t` **完全相同**，用 `>` 比较会把它们重复取出来。按 `url`/`rid` 去重更稳（工具内部跨页去重用的也是这个键）
 - 单个号一页能取约 20 次群发，展开后通常 70–80 篇
-- `meta.requestsTotal` 是本次**实际发出**的请求数（提前取完会比预告少）
+- `meta.requestsTotal` 仅为本次列表请求尝试数（提前取完会比预告少）；`meta.links.requestsTotal` 是单篇转链尝试数，两者不混算
+- `linkStatus` 为 `short_token`（短链规则生成）、`metadata_url`（单篇元数据生成，未自动在线核验）或 `unresolved`（`url` 为空，附 `linkReason`）。`meta.links.resolved` 按唯一 rid 计数，`unresolved` 按仍缺链的文章行计数；`aborted` 记录批次中止原因，不包含原始 HTML 或临时票据
 - `pageMeta` 逐页记 `{offset, reviews, items, oldest}`，用来核对翻页是不是真的翻动了：三页的 `oldest` 应当**严格递减**
 - 某个号的字段含义：`err` = 这个号**一篇都没取到**；`partialErr` = 翻到第 `pagesFetched+1` 页时停了，**前面的都在 `items` 里**
 
@@ -409,6 +435,8 @@ bin/weread.mjs        命令行入口
 lib/cdp.mjs           零依赖的 Chrome 控制客户端(自己实现了 WebSocket)
 lib/scripts.mjs       注入页面执行的 JS:状态探针 / 取一页文章 / 书架 / 订阅
 lib/fetchflow.mjs     翻页调度:翻页、去重、间隔、部分失败、-2041 出错路径(纯逻辑,零网络)
+lib/links.mjs         单篇转链调度、公众号/标题/四参数校验(依赖注入)
+lib/link-metadata.mjs 静态HTML元数据提取，不执行HTML、不加载资源
 lib/render.mjs        时间格式化 + Markdown 表格(唯一的日期格式化实现)
 lib/save.mjs          写文件(--out)
 lib/args.mjs          命令行参数解析
