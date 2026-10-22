@@ -164,8 +164,8 @@ const groups = {
     {
       createTime: 100,
       subReviews: [
-        { review: { createTime: 100, reviewId: 'r1', mpInfo: { title: '第一篇', originalId: 'AAA' } } },
-        { review: { createTime: 100, reviewId: 'r2', mpInfo: { title: '第二篇', originalId: 'BBB' } } },
+        { review: { createTime: 100, reviewId: 'r1', mpInfo: { title: '第一篇', originalId: 'AAAAAAAAAAAAAAAAAAAAAA' } } },
+        { review: { createTime: 100, reviewId: 'r2', mpInfo: { title: '第二篇', originalId: 'BBBBBBBBBBBBBBBBBBBBBB' } } },
       ],
     },
   ],
@@ -180,7 +180,7 @@ ok('实际请求的 URL 只带 bookId 与 offset(不含 count / maxIdx)');
 assert.equal(p1.out.ok, true);
 assert.equal(p1.out.reviews, 1, 'reviews 报的是**群发条数**,翻页靠它累加 offset');
 assert.equal(p1.out.items.length, 2, '同一次群发的两篇都要取到');
-assert.equal(p1.out.items[0].url, 'https://mp.weixin.qq.com/s/AAA');
+assert.equal(p1.out.items[0].url, 'https://mp.weixin.qq.com/s/AAAAAAAAAAAAAAAAAAAAAA');
 assert.equal(p1.out.onReader, true);
 ok('一次群发含多篇时全部展开,原文链接拼接正确');
 
@@ -355,16 +355,16 @@ const TODAY = `${today.getFullYear()}-${p2d(today.getMonth() + 1)}-${p2d(today.g
 const st2 = path.join(tmp, 'old.json');
 fs.writeFileSync(st2, JSON.stringify({ date: TODAY, count: 1 }));
 assert.equal(quota.check(st2, 2).count, 1, '老账本的 count 要读出来');
-assert.deepEqual(quota.status(st2, 2, 40).requests, { articles: 0, shelf: 0, used: 0, max: 40 });
+assert.deepEqual(quota.status(st2, 2, 40).requests, { articles: 0, shelf: 0, content: 0, used: 0, max: 40 });
 ok('老格式账本能读,缺失的请求明细按 0 算');
 
 // commit 记的是**实际**发生数
 quota.commit(st2, { articles: 12, shelf: 1 });
 const after = JSON.parse(fs.readFileSync(st2, 'utf8'));
 assert.equal(after.count, 2);
-assert.deepEqual(after.requests, { articles: 12, shelf: 1 });
-assert.deepEqual(Object.keys(after.requests).sort(), ['articles', 'shelf'], '账本明细只有 articles / shelf');
-ok('commit 记实际请求数,账本字段是 {articles, shelf}');
+assert.deepEqual(after.requests, { articles: 12, shelf: 1, content: 0 });
+assert.deepEqual(Object.keys(after.requests).sort(), ['articles', 'content', 'shelf'], 'content独立记录，不计预算');
+ok('commit只记列表/书架请求，单篇尝试由独立接口记录');
 
 // 回滚兼容:新账本被老代码读到时,多出来的字段只是被忽略,count 仍然正确
 assert.equal(after.date, TODAY);
@@ -480,7 +480,7 @@ assert.equal(imported.stderr, '', `import 时 stderr 必须为空,实际:${impor
 ok(`被 import 时不执行 main()(stdout/stderr 均空,端口 ${deadPort} 实测无人监听)`);
 
 // 正向:CLI 入口没有被守卫关死。--quota 在 connectChrome 之前,零网络零额度。
-const quotaLine = /^今日\(\d{4}-\d{2}-\d{2}\)已抓 0\/2 次;请求 0\/40\(文章 0,书架 0\)\n$/;
+const quotaLine = /^今日\(\d{4}-\d{2}-\d{2}\)已抓 0\/2 次;预算请求 0\/40\(列表 0,书架 0\);转链尝试 0\(不占预算\)\n$/;
 const direct = runCapture([path.join(ROOT, 'bin/weread.mjs'), '--config', guardCfg, '--quota']);
 assert.equal(direct.code, 0, `直接调用应退出 0,stderr:${direct.stderr.slice(0, 400)}`);
 assert.match(direct.stdout, quotaLine, `stdout 必须恰好是那一行,实际:${JSON.stringify(direct.stdout)}`);
@@ -1129,13 +1129,13 @@ ok('getReaderTab 如实报出书架请求数:复用页=0、推导 readerUrl=1、
   const fakeResult = { onReader: true, meta: { pages: 1, requestsTotal: 4 }, sources: [] };
 
   commitRun({ statePath: stReuse }, fakeResult, rA.shelfRequests);
-  assert.deepEqual(JSON.parse(fs.readFileSync(stReuse, 'utf8')).requests, { articles: 4, shelf: 0 });
+  assert.deepEqual(JSON.parse(fs.readFileSync(stReuse, 'utf8')).requests, { articles: 4, shelf: 0, content: 0 });
   assert.equal(quota.status(stReuse, 2, 40).requests.used, 4);
 
   commitRun({ statePath: stDerive }, fakeResult, rB.shelfRequests);
   assert.deepEqual(
     JSON.parse(fs.readFileSync(stDerive, 'utf8')).requests,
-    { articles: 4, shelf: 1 },
+    { articles: 4, shelf: 1, content: 0 },
     '书架请求要落在 shelf 一栏,不能混进 articles'
   );
   assert.equal(quota.status(stDerive, 2, 40).requests.used, 5, 'shelf 计入 used(用户知情授权的额度语义变更)');
@@ -1290,7 +1290,14 @@ assert.equal(goldenNow.sources.length, GOLDEN.sources.length);
 for (let i = 0; i < GOLDEN.sources.length; i++) {
   assert.equal(goldenNow.sources[i].name, GOLDEN.sources[i].name, '② name');
   assert.equal(goldenNow.sources[i].bookId, GOLDEN.sources[i].bookId, '② bookId');
-  assert.deepEqual(goldenNow.sources[i].items, GOLDEN.sources[i].items, '③ 数据本体必须逐字段一致');
+  const actualItems = goldenNow.sources[i].items;
+  const expectedItems = GOLDEN.sources[i].items;
+  assert.equal(actualItems.length, expectedItems.length);
+  for (let j = 0; j < expectedItems.length; j++) {
+    const { linkStatus, ...legacy } = actualItems[j];
+    assert.equal(linkStatus, 'short_token', '合法短token新增的状态必须明确');
+    assert.deepEqual(legacy, expectedItems[j], '③ 合法短token的原字段逐字段与旧实现一致，不许静默增删');
+  }
   const added = diff(Object.keys(goldenNow.sources[i]), Object.keys(GOLDEN.sources[i]));
   const removed = diff(Object.keys(GOLDEN.sources[i]), Object.keys(goldenNow.sources[i]));
   assert.deepEqual(diff(added, SRC_ADD_OK), [], `⑤ source 级新增字段超出白名单:${added}`);
@@ -1300,6 +1307,6 @@ const addedTop = diff(Object.keys(goldenNow), Object.keys(GOLDEN));
 const removedTop = diff(Object.keys(GOLDEN), Object.keys(goldenNow));
 assert.deepEqual(diff(addedTop, TOP_ADD_OK), [], `④ 顶层新增字段超出白名单:${addedTop}`);
 assert.deepEqual(removedTop, [], `⑥ 顶层字段被删:${removedTop}`);
-ok('pages=1 的产物与改动前的 golden 六条口径全对得上(新增只有 meta / pageMeta / pagesFetched)');
+ok('pages=1 合法短token的原字段与旧golden一致，仅允许已申报的linkStatus及翻页字段新增');
 
 console.log(`\n全部通过(${passed} 项)`);

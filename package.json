@@ -5,7 +5,7 @@
   "type": "module",
   "bin": { "weread-mp-fetcher": "bin/weread.mjs" },
   "scripts": {
-    "test": "node test/offline.test.mjs",
+    "test": "node test/offline.test.mjs && node --test test/link-metadata.test.mjs test/wr-links.test.mjs test/wr-cli.test.mjs",
     "probe": "node bin/weread.mjs --probe"
   },
   "engines": { "node": ">=18" },

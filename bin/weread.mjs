@@ -17,13 +17,14 @@ import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { connectChrome, listTabs, createTab, evaluate, reloadTab } from '../lib/cdp.mjs';
-import { PROBE_JS, buildPageJs, LIST_SHELF_JS, buildAddToShelfJs } from '../lib/scripts.mjs';
+import { PROBE_JS, buildPageJs, buildContentJs, LIST_SHELF_JS, buildAddToShelfJs } from '../lib/scripts.mjs';
 import { resolveBookId } from '../lib/mp.mjs';
 import * as quota from '../lib/quota.mjs';
 import { has, val, valOpt } from '../lib/args.mjs';
 import { toMarkdown, fmtStamp } from '../lib/render.mjs';
 import { normalizeOut, writeText } from '../lib/save.mjs';
 import { fetchAll, diagnose2041, format2041Note } from '../lib/fetchflow.mjs';
+import { resolveLinks, linkReasonText } from '../lib/links.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -224,7 +225,8 @@ async function main() {
     const r = s.requests;
     console.log(
       `今日(${s.date})已抓 ${s.count}${s.max ? '/' + s.max : ''} 次;` +
-        `请求 ${r.used}${r.max ? '/' + r.max : '(不限)'}(文章 ${r.articles},书架 ${r.shelf})`
+        `预算请求 ${r.used}${r.max ? '/' + r.max : '(不限)'}(列表 ${r.articles},书架 ${r.shelf});` +
+        `转链尝试 ${r.content}(不占预算)`
     );
     return;
   }
@@ -268,7 +270,7 @@ async function main() {
       process.exitCode = 3;
       return;
     }
-    console.error(`预计 ${need} 个请求,今日已用 ${rq.used}${rq.max ? '/' + rq.max : '(不限)'} —— 可以执行。`);
+    console.error(`预计 ${need} 个预算内列表请求,今日已用 ${rq.used}${rq.max ? '/' + rq.max : '(不限)'} —— 可以执行。`);
   }
 
   const session = await connectChrome({ port: cfg.chromePort, profileDir: cfg.chromeProfileDir });
@@ -366,7 +368,7 @@ async function main() {
         `间隔 ${gapMs}ms,预计等待 ~${Math.round(((maxReq - 1) * gapMs) / 1000)}s(提前取完会更少)。`
     );
 
-    const result = await fetchAll({
+    let result = await fetchAll({
       accounts: cfg.accounts,
       pages,
       gapMs,
@@ -398,7 +400,27 @@ async function main() {
       return;
     }
 
+    const missing = result.sources.reduce((n, s) => n + (s.items || []).filter(it => !it.url).length, 0);
+    if (missing) {
+      console.error(
+        `本轮 ${missing} 篇未取得原文链接，将为合法且唯一的 reviewId 逐篇转链。\n` +
+        '  每篇额外请求一次，间隔至少3秒（有效的更长配置照用）；转链尝试单独记录，不占列表/书架预算。'
+      );
+    }
+    result = await resolveLinks(result, {
+      gapMs: cfg.requestIntervalMs,
+      sleep: ms => new Promise(resolve => setTimeout(resolve, ms)),
+      probe: async () => JSON.parse(await evaluate(session, targetId, PROBE_JS)),
+      record: () => quota.recordContentAttempt(cfg.statePath),
+      run: async it => JSON.parse(await evaluate(session, targetId, buildContentJs(it.rid))),
+      onProgress: stats => console.error(`转链进度:已尝试 ${stats.requestsTotal}/${stats.candidates}，成功 ${stats.resolved}。`),
+    });
+    const links = result.meta.links;
+    if (links.aborted) console.error(`转链已停止:${linkReasonText(links.aborted.reason)}；不会自动重试。`);
+    if (missing) console.error(`转链汇总:尝试 ${links.requestsTotal}，取得 ${links.resolved} 个唯一原文链接，仍有 ${links.unresolved} 篇原文链接未取得。`);
+
     // 记的是**实际发出**的请求数,不是预估值。
+    // 单篇尝试已独立记录，此处不得再记一次或多扣一次运行次数。
     //
     // 全仓库一共有四处会发 /web/shelf/sync,它们进不进账本各有各的理由,**不对称是刻意的**:
     //   1. getReaderTab 推导 readerUrl 那一次 → **记**(shelfRequests,本次改动)。
@@ -412,7 +434,13 @@ async function main() {
     //   4. --probe → 探针整体免费,同样在这一行之前 return;它可能也发了 1 次(走的是同一个
     //      getReaderTab),但探针路径不 commit,所以不记。
     // ⚠️ 将来若让全失败也记账,第 2 条必须同步改成真实计数。
-    commitRun(cfg, result, shelfRequests);
+    if (links.aborted?.reason === 'record_failed') {
+      // 已知账本不可写时，不让第二次写入失败把已抓列表也吞掉。
+      console.error('账本写入失败，本轮未完成次数及列表请求结算；结果仍导出，请修复账本后再运行。');
+      process.exitCode = 1;
+    } else {
+      commitRun(cfg, result, shelfRequests);
+    }
 
     // ★ 顺序:抓取 → 渲染(只发生一次) → 输出。两条输出路径共用同一个 normalizeOut,
     //   这样"文件字节流 === 不加 --out 时终端收到的字节流"是结构性成立的。
